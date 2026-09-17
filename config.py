@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
@@ -12,7 +12,7 @@ load_dotenv()
 
 @dataclass(frozen=True)
 class CollectorConfig:
-    api_key: str
+    api_key: str = field(repr=False)
     api_base_url: str = "https://www.googleapis.com/youtube/v3"
     recent_min_videos: int = 5
     recent_max_videos: int = 10
@@ -20,7 +20,9 @@ class CollectorConfig:
 
     @classmethod
     def from_env(cls) -> "CollectorConfig":
-        api_key = os.getenv("YOUTUBE_API_KEY", "").strip()
+        from research.profiles import ApiProfiles
+        profiles = ApiProfiles()
+        api_key = profiles.resolve(profiles.default)
         if not api_key:
             raise ValueError(
                 "YOUTUBE_API_KEY is not configured. Put it in .env or the environment."

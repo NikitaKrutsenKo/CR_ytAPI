@@ -1,12 +1,11 @@
 from __future__ import annotations
-from collections import Counter
-from dataclasses import dataclass
-from datetime import datetime
-import json
+
 import math
-from pathlib import Path
 import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
 from zoneinfo import ZoneInfo
+
 from research.domain import ExperimentConfig, Mode, now_utc
 
 
@@ -29,27 +28,47 @@ class QuotaManager:
     Pacific calendar days match the API reset day. Never rotates credentials.
     SQLite transactions coordinate concurrent application instances.
     """
-    def __init__(self, path: Path, profile: str, search_budget=100, other_budget=10000,
-                 reserve_percent=10.0, clock=now_utc):
+
+    def __init__(
+        self,
+        path: Path,
+        profile: str,
+        search_budget=100,
+        other_budget=10000,
+        reserve_percent=10.0,
+        clock=now_utc,
+    ):
         self.path, self.profile, self.clock = Path(path), profile, clock
         self.limits = (search_budget, other_budget)
         self.reserve = reserve_percent
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.path) as db:
-            db.execute("CREATE TABLE IF NOT EXISTS usage (profile TEXT, day TEXT, endpoint TEXT, calls INTEGER, PRIMARY KEY(profile,day,endpoint))")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS usage (profile TEXT, day TEXT, endpoint TEXT, calls INTEGER, PRIMARY KEY(profile,day,endpoint))"
+            )
 
     def _day(self) -> str:
         return self.clock().astimezone(ZoneInfo("America/Los_Angeles")).date().isoformat()
 
     def usage(self) -> dict:
         with sqlite3.connect(self.path) as db:
-            rows = dict(db.execute("SELECT endpoint,calls FROM usage WHERE profile=? AND day=?", (self.profile, self._day())))
-        return {"label": "Local estimate", "api_profile_name": self.profile, "day": self._day(),
-                "search_calls_used": rows.get("search", 0),
-                "other_units_estimated": sum(n for key, n in rows.items() if key != "search"),
-                "search_calls_budget": self.limits[0], "other_units_budget": self.limits[1],
-                "reserve_percent": self.reserve, "api_calls_by_endpoint": rows,
-                "actual_local_call_count": sum(rows.values())}
+            rows = dict(
+                db.execute(
+                    "SELECT endpoint,calls FROM usage WHERE profile=? AND day=?", (self.profile, self._day())
+                )
+            )
+        return {
+            "label": "Local estimate",
+            "api_profile_name": self.profile,
+            "day": self._day(),
+            "search_calls_used": rows.get("search", 0),
+            "other_units_estimated": sum(n for key, n in rows.items() if key != "search"),
+            "search_calls_budget": self.limits[0],
+            "other_units_budget": self.limits[1],
+            "reserve_percent": self.reserve,
+            "api_calls_by_endpoint": rows,
+            "actual_local_call_count": sum(rows.values()),
+        }
 
     def consume(self, endpoint: str) -> None:
         if endpoint not in {"search", "videos", "channels", "playlistItems"}:
@@ -57,12 +76,21 @@ class QuotaManager:
         day = self._day()
         with sqlite3.connect(self.path, timeout=30) as db:
             db.execute("BEGIN IMMEDIATE")
-            rows = dict(db.execute("SELECT endpoint,calls FROM usage WHERE profile=? AND day=?", (self.profile, day)))
-            used = rows.get("search", 0) if endpoint == "search" else sum(n for k, n in rows.items() if k != "search")
+            rows = dict(
+                db.execute("SELECT endpoint,calls FROM usage WHERE profile=? AND day=?", (self.profile, day))
+            )
+            used = (
+                rows.get("search", 0)
+                if endpoint == "search"
+                else sum(n for k, n in rows.items() if k != "search")
+            )
             limit = self.limits[0 if endpoint == "search" else 1] * (1 - self.reserve / 100)
             if used + 1 > limit:
                 raise QuotaStopped(f"Quota safety stop: {endpoint}; local estimate")
-            db.execute("INSERT INTO usage VALUES (?,?,?,1) ON CONFLICT(profile,day,endpoint) DO UPDATE SET calls=calls+1", (self.profile, day, endpoint))
+            db.execute(
+                "INSERT INTO usage VALUES (?,?,?,1) ON CONFLICT(profile,day,endpoint) DO UPDATE SET calls=calls+1",
+                (self.profile, day, endpoint),
+            )
 
     def estimate(self, config: ExperimentConfig) -> QuotaEstimate:
         """Conservative full-run plan: cold creator caches and all retries each cycle."""
@@ -71,18 +99,28 @@ class QuotaManager:
         requests = config.requests
         if config.mode == Mode.PRODUCT:
             requests = (max(requests, key=lambda r: r.page_size * r.max_pages),)
-        search = cycles * sum(r.max_pages for r in requests)
+        search = cycles * (
+            max(r.max_pages for r in config.requests)
+            if config.mode == Mode.PRODUCT
+            else sum(r.max_pages for r in requests)
+        )
         other = cycles * sum(math.ceil(r.page_size * r.max_pages / 50) for r in requests)
         if config.mode in (Mode.GAP, Mode.COMBINED, Mode.PRODUCT):
             creators = sum(r.page_size * r.max_pages for r in requests)
-            other += cycles * (math.ceil(creators / 50) + creators * config.baseline_pages + math.ceil(creators * config.baseline_max / 50))
+            other += cycles * (
+                math.ceil(creators / 50)
+                + creators * config.baseline_pages
+                + math.ceil(creators * config.baseline_max / 50)
+            )
         if config.mode != Mode.GAP and config.mode != Mode.HISTORICAL:
             tracking_cycles = max(0, math.ceil(config.duration_minutes / config.tracking_minutes) - 1)
             other += tracking_cycles * len(config.requests) * math.ceil(config.tracked_limit / 50)
         search *= config.max_retries + 1
         other *= config.max_retries + 1
         used = self.usage()
-        ratios = [(search + used["search_calls_used"]) / (self.limits[0] * (1-self.reserve/100)),
-                  (other + used["other_units_estimated"]) / (self.limits[1] * (1-self.reserve/100))]
-        status = "WOULD EXCEED BUDGET" if max(ratios) > 1 else "WARNING" if max(ratios) > .8 else "SAFE"
+        ratios = [
+            (search + used["search_calls_used"]) / (self.limits[0] * (1 - self.reserve / 100)),
+            (other + used["other_units_estimated"]) / (self.limits[1] * (1 - self.reserve / 100)),
+        ]
+        status = "WOULD EXCEED BUDGET" if max(ratios) > 1 else "WARNING" if max(ratios) > 0.8 else "SAFE"
         return QuotaEstimate(search, other, status)

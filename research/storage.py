@@ -1,9 +1,11 @@
 from __future__ import annotations
+
 import csv
 import json
-from pathlib import Path
 import re
+from pathlib import Path
 from uuid import uuid4
+
 from research.domain import CollectionBundle, ExperimentConfig, encode, fingerprint, iso, now_utc
 
 
@@ -48,6 +50,7 @@ def read_jsonl(path: Path) -> list[dict]:
 
 class TopicWorkspaceManager:
     """Immutable raw records per topic; run-scoped state prevents cross-experiment leakage."""
+
     def __init__(self, root: Path):
         self.root = Path(root).resolve()
 
@@ -57,10 +60,24 @@ class TopicWorkspaceManager:
         return self.root / "data" / "topics" / topic_id
 
     def create(self, config: ExperimentConfig, parent=None) -> Path:
-        experiment = self.root / "experiments" / ("exp_" + now_utc().strftime("%Y%m%dT%H%M%S") + "_" + uuid4().hex[:10])
+        experiment = (
+            self.root
+            / "experiments"
+            / ("exp_" + now_utc().strftime("%Y%m%dT%H%M%S") + "_" + uuid4().hex[:10])
+        )
         experiment.mkdir(parents=True)
-        write_json(experiment / "experiment.json", {"schema_version": "2.0", "experiment_id": experiment.name,
-                   "created_at": iso(now_utc()), "config_hash": fingerprint(config), "config": config, "replay_of": parent}, True)
+        write_json(
+            experiment / "experiment.json",
+            {
+                "schema_version": "2.0",
+                "experiment_id": experiment.name,
+                "created_at": iso(now_utc()),
+                "config_hash": fingerprint(config),
+                "config": config,
+                "replay_of": parent,
+            },
+            True,
+        )
         write_json(experiment / "topics.json", [r.topic for r in config.requests], True)
         for request in config.requests:
             path = self.topic(request.topic.topic_id)
@@ -73,7 +90,10 @@ class TopicWorkspaceManager:
     def save_bundle(self, experiment: Path, bundle: CollectionBundle) -> None:
         raw_path = self.topic(bundle.topic.topic_id) / "raw" / (bundle.metadata.batch_id + ".json")
         write_json(raw_path, bundle, True)
-        append_jsonl(experiment / "inputs.jsonl", {"path": str(raw_path.relative_to(self.root)), "sha256": fingerprint(bundle)})
+        append_jsonl(
+            experiment / "inputs.jsonl",
+            {"path": str(raw_path.relative_to(self.root)), "sha256": fingerprint(bundle)},
+        )
         for row in bundle.telemetry:
             append_jsonl(experiment / "telemetry.jsonl", row)
 
@@ -104,4 +124,6 @@ class TopicWorkspaceManager:
         write_json(experiment / "state" / topic_id / (kind + ".json"), state)
 
     def event(self, experiment: Path, operation: str, **fields) -> None:
-        append_jsonl(experiment / "events.jsonl", {"timestamp": iso(now_utc()), "operation": operation, **fields})
+        append_jsonl(
+            experiment / "events.jsonl", {"timestamp": iso(now_utc()), "operation": operation, **fields}
+        )

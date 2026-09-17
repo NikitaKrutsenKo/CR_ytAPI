@@ -1,25 +1,32 @@
-from datetime import datetime, timezone
 from dataclasses import replace
+from datetime import UTC, datetime
+
 import pytest
-from research.domain import CandidateTopic, CollectionRequest, ExperimentConfig, Mode, Status
+
 from research.discovery import YouTubeDiscoveryCollector
+from research.domain import CandidateTopic, CollectionRequest, ExperimentConfig, Mode, Status
 from research.profiles import ApiProfiles
 from research.quota import QuotaManager, QuotaStopped
-from youtube.client import YouTubeClient, YouTubeApiError
+from youtube.client import YouTubeClient
 from youtube.videos import YouTubeVideoService
 
-NOW = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 17, 12, tzinfo=UTC)
 
 
 def video(identifier="v", channel="c", views=100):
-    return {"id": identifier, "snippet": {"channelId": channel, "publishedAt": "2026-09-17T11:00:00Z", "title": identifier},
-            "statistics": {"viewCount": str(views), "likeCount": "10", "commentCount": "1"}}
+    return {
+        "id": identifier,
+        "snippet": {"channelId": channel, "publishedAt": "2026-09-17T11:00:00Z", "title": identifier},
+        "statistics": {"viewCount": str(views), "likeCount": "10", "commentCount": "1"},
+    }
 
 
 class FakeClient:
     profile = "DEFAULT"
+
     def __init__(self):
         self.telemetry, self.calls = [], []
+
     def get(self, resource, params):
         self.calls.append((resource, params))
         if resource == "search":
@@ -29,16 +36,26 @@ class FakeClient:
         if resource == "videos":
             return {"items": [video(v) for v in params["id"].split(",")]}
         if resource == "channels":
-            return {"items": [{"id": c, "contentDetails": {"relatedPlaylists": {"uploads": "p"+c}}} for c in params["id"].split(",")]}
-        return {"items": [{"contentDetails": {"videoId": "r"+str(i)}} for i in range(5)]}
+            return {
+                "items": [
+                    {"id": c, "contentDetails": {"relatedPlaylists": {"uploads": "p" + c}}}
+                    for c in params["id"].split(",")
+                ]
+            }
+        return {"items": [{"contentDetails": {"videoId": "r" + str(i)}} for i in range(5)]}
 
 
 def test_static_rolling_incremental():
     request = CollectionRequest(CandidateTopic.named("AI"))
     start, end, effective = request.bounds(NOW, "2026-09-17T11:30:00Z")
     assert effective.minute == 25 and effective.hour == 11
-    assert (end-start).total_seconds() == 86400
-    static = replace(request, window_mode="STATIC", requested_from="2026-09-01T00:00:00Z", requested_to="2026-09-02T00:00:00Z")
+    assert (end - start).total_seconds() == 86400
+    static = replace(
+        request,
+        window_mode="STATIC",
+        requested_from="2026-09-01T00:00:00Z",
+        requested_to="2026-09-02T00:00:00Z",
+    )
     assert static.bounds(NOW, "2026-09-17T00:00:00Z")[0] == static.bounds(NOW)[2]
     with pytest.raises(ValueError):
         replace(static, requested_from="2026-09-01T00:00:00").bounds(NOW)
@@ -46,7 +63,9 @@ def test_static_rolling_incremental():
 
 def test_pagination_dedupe_missing_optional():
     client = FakeClient()
-    bundle = YouTubeDiscoveryCollector(client).collect(CollectionRequest(CandidateTopic.named("AI"), max_pages=2), now=NOW)
+    bundle = YouTubeDiscoveryCollector(client).collect(
+        CollectionRequest(CandidateTopic.named("AI"), max_pages=2), now=NOW
+    )
     assert bundle.metadata.pages_received == 2
     assert bundle.metadata.duplicates_removed == 1
     assert bundle.metadata.unique_video_count == 1
@@ -62,7 +81,9 @@ def test_batched_ids():
 
 
 def test_profiles(tmp_path):
-    profiles = ApiProfiles(tmp_path / "absent", {"YOUTUBE_API_KEY_NICK": "test-only", "YOUTUBE_API_KEY_DEFAULT": ""})
+    profiles = ApiProfiles(
+        tmp_path / "absent", {"YOUTUBE_API_KEY_NICK": "test-only", "YOUTUBE_API_KEY_DEFAULT": ""}
+    )
     assert profiles.names == ["NICK"]
     assert profiles.resolve("NICK") == "test-only"
     assert "test-only" not in repr(profiles)
@@ -87,12 +108,16 @@ def test_retry_telemetry_and_secret_safety(tmp_path):
     class Response:
         def __init__(self, status):
             self.status_code, self.ok = status, status == 200
+
         def json(self):
             return {"items": []}
+
     class Session:
         statuses = iter([429, 500, 200])
+
         def get(self, *args, **kwargs):
             return Response(next(self.statuses))
+
     quota = QuotaManager(tmp_path / "quota.sqlite", "DEFAULT")
     client = YouTubeClient("test-secret", quota=quota, session=Session(), sleeper=lambda _: None)
     assert client.get("videos", {}) == {"items": []}

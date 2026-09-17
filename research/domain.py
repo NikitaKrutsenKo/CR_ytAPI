@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
-from enum import StrEnum
-from hashlib import sha256
 import json
 import math
 import re
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
+from hashlib import sha256
 from typing import Any
-from uuid import uuid4
 
 
 def utc(value: datetime | str) -> datetime:
@@ -16,11 +15,11 @@ def utc(value: datetime | str) -> datetime:
     value = datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else value
     if value.tzinfo is None:
         raise ValueError("Timestamp must include a timezone")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def iso(value: datetime) -> str:
@@ -63,6 +62,7 @@ class Status(StrEnum):
 @dataclass(frozen=True)
 class CandidateTopic:
     """Stable identity; aliases do not silently create extra API searches."""
+
     topic_id: str
     canonical_name: str
     aliases: tuple[str, ...] = ()
@@ -84,6 +84,7 @@ class CandidateTopic:
 @dataclass(frozen=True)
 class CollectionRequest:
     """Static bounds or rolling window, plus incremental discovery overlap."""
+
     topic: CandidateTopic
     window_mode: str = "ROLLING"
     rolling_hours: float = 24.0
@@ -127,6 +128,7 @@ class VideoIdentity:
 @dataclass(frozen=True)
 class VideoObservation:
     """One immutable observation. Missing optional counters remain None, never zero."""
+
     identity: VideoIdentity
     timestamp: str
     views: int | None
@@ -163,6 +165,11 @@ class CollectionMetadata:
     config_hash: str = ""
     aliases: tuple[str, ...] = ()
     order: str = "date"
+    api_calls_by_endpoint: dict[str, int] = field(default_factory=dict)
+    actual_local_call_count: int = 0
+    estimated_quota_cost: dict[str, int] = field(default_factory=dict)
+    trend_formula_version: str = ""
+    gap_formula_version: str = ""
 
 
 @dataclass(frozen=True)
@@ -176,11 +183,15 @@ class QuotaTelemetry:
     duration_ms: float = 0.0
     number_of_calls: int = 1
     pages: int = 0
+    experiment_id: str = ""
+    topic_id: str = ""
+    operation: str = ""
 
 
 @dataclass(frozen=True)
 class CollectionBundle:
     """Shared, unfiltered ingestion output; enrichment is persisted separately."""
+
     topic: CandidateTopic
     metadata: CollectionMetadata
     observations: tuple[VideoObservation, ...]
@@ -195,18 +206,25 @@ class CollectionBundle:
             raise ValueError("Unsupported raw schema; use legacy replay for schema 1.0")
         metadata = dict(raw["metadata"])
         metadata["status"] = Status(metadata["status"])
-        return cls(CandidateTopic(**raw["topic"]), CollectionMetadata(**metadata),
-                   tuple(VideoObservation(VideoIdentity(**v["identity"]), v["timestamp"],
-                                          v["views"], v["likes"], v["comments"])
-                         for v in raw["observations"]),
-                   tuple(VideoIdentity(**v) for v in raw.get("discovery", [])),
-                   tuple(QuotaTelemetry(**v) for v in raw.get("telemetry", [])),
-                   tuple(raw.get("warnings", [])))
+        return cls(
+            CandidateTopic(**raw["topic"]),
+            CollectionMetadata(**metadata),
+            tuple(
+                VideoObservation(
+                    VideoIdentity(**v["identity"]), v["timestamp"], v["views"], v["likes"], v["comments"]
+                )
+                for v in raw["observations"]
+            ),
+            tuple(VideoIdentity(**v) for v in raw.get("discovery", [])),
+            tuple(QuotaTelemetry(**v) for v in raw.get("telemetry", [])),
+            tuple(raw.get("warnings", [])),
+        )
 
 
 @dataclass(frozen=True)
 class ExperimentConfig:
     """Immutable run plan, with formula snapshots rather than mutable file references."""
+
     mode: Mode
     requests: tuple[CollectionRequest, ...]
     api_profile_name: str = "DEFAULT"
@@ -231,14 +249,22 @@ class ExperimentConfig:
             raise ValueError("Provide at least one distinct topic")
         for request in self.requests:
             request.bounds(now_utc())
-        for value in (self.duration_minutes, self.discovery_minutes, self.tracking_minutes, self.baseline_ttl_hours):
+        for value in (
+            self.duration_minutes,
+            self.discovery_minutes,
+            self.tracking_minutes,
+            self.baseline_ttl_hours,
+        ):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError("Durations and intervals must be positive and finite")
         if not 1 <= self.baseline_min <= self.baseline_max <= 50 or self.baseline_pages < 1:
             raise ValueError("Invalid creator baseline settings")
         if not 0 <= self.exploration_fraction <= 1 or not 0 <= self.reserve_percent < 100:
             raise ValueError("Invalid allocation or reserve")
-        if min(self.search_budget, self.other_budget, self.tracked_limit) < 1 or not 0 <= self.max_retries <= 5:
+        if (
+            min(self.search_budget, self.other_budget, self.tracked_limit) < 1
+            or not 0 <= self.max_retries <= 5
+        ):
             raise ValueError("Invalid budget, tracked limit or retry count")
         if self.mode == Mode.HISTORICAL and any(r.window_mode != "STATIC" for r in self.requests):
             raise ValueError("Historical validation requires a static publication window")
@@ -247,7 +273,9 @@ class ExperimentConfig:
     def from_dict(cls, raw: dict) -> ExperimentConfig:
         raw = dict(raw)
         raw["mode"] = Mode(raw["mode"])
-        raw["requests"] = tuple(CollectionRequest(**{**r, "topic": CandidateTopic(**r["topic"])}) for r in raw["requests"])
+        raw["requests"] = tuple(
+            CollectionRequest(**{**r, "topic": CandidateTopic(**r["topic"])}) for r in raw["requests"]
+        )
         result = cls(**raw)
         result.validate()
         return result
@@ -256,6 +284,7 @@ class ExperimentConfig:
 @dataclass(frozen=True)
 class KnownEvent:
     """Evaluation-only ground truth. Never passed into either metric engine."""
+
     topic_id: str
     event_name: str
     event_type: str
@@ -268,5 +297,7 @@ class KnownEvent:
     def __post_init__(self) -> None:
         utc(self.event_time)
         utc(self.verified_at)
+        if not self.event_name.strip() or not self.topic_id.strip():
+            raise ValueError("Known event requires a name and topic ID")
         if not self.source_url.startswith(("https://", "http://")):
             raise ValueError("Known events require a traceable source URL")
