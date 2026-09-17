@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+from research.configuration import resolve_formulas
 from research.domain import ExperimentConfig, fingerprint
 from research.processing import MetricProcessor
 from research.storage import TopicWorkspaceManager, read_json, read_jsonl, write_json
@@ -23,12 +24,15 @@ class ReplayService:
         notify=lambda event: None,
     ) -> Path:
         metadata = read_json(source / "experiment.json")
+        if fingerprint(metadata["config"]) != metadata["config_hash"]:
+            raise ValueError("Experiment configuration checksum mismatch")
         config = ExperimentConfig.from_dict(metadata["config"])
         config = replace(
             config,
             gap_formula=gap_formula if gap_formula is not None else config.gap_formula,
             trend_formula=trend_formula if trend_formula is not None else config.trend_formula,
         )
+        config = resolve_formulas(config)
         # Validate all input references before allocating a derived experiment.
         bundles = list(self.store.bundles(source))
         if not bundles:

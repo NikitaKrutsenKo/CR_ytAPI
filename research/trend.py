@@ -114,7 +114,7 @@ class TrendEnricher:
 
 
 class TrendEngine:
-    """Deterministic YouTube components following MathCore notebook v2 sections 4РІР‚вЂњ12.
+    """Deterministic YouTube components following MathCore notebook v2 sections 4Р Р†Р вЂљРІР‚Сљ12.
 
     Query search has no incidence denominator. Components use a explicitly versioned
     publication-activity proxy. Production Trend Score stays null because Reddit,
@@ -222,6 +222,45 @@ class TrendEngine:
             self.pending_engagement.clear()
             return row
         rate = row["youtube_activity_rate"]
+        smoothed, velocity, acceleration, growth, burst, breadth = self._components(
+            rate, hours, previous_time, creators
+        )
+        engagement = mean(self.pending_engagement) if self.pending_engagement else None
+        self.pending_engagement.clear()
+        state.valid_windows += 1
+        state.contiguous_windows = state.contiguous_windows + 1 if slots == 1 else 1
+        state.valid_duration_hours += config.window_hours
+        duration = min(state.valid_duration_hours / 3, 1)
+        confidence = min(
+            0.3 * row["confidence_N"]
+            + 0.2 * row["confidence_D"]
+            + 0.2 * row["freshness"]
+            + 0.2 * row["completeness"]
+            + 0.1 * duration,
+            config.source_cap,
+        )
+        row.update(
+            ewma=smoothed,
+            velocity=velocity,
+            acceleration=acceleration,
+            growth=growth,
+            burst=burst,
+            engagement=engagement,
+            breadth=breadth,
+            confidence_O=duration,
+            confidence=confidence,
+        )
+        self._publish(row, origins, n_eff)
+        row["lifecycle"] = state.lifecycle
+        state.history.append({"ewma": smoothed, "velocity": velocity, "creators": creators})
+        state.history = state.history[-config.baseline_limit :]
+        state.last_timestamp, state.ewma, state.velocity = timestamp, smoothed, velocity
+        self.enricher.prune(end)
+        return row
+
+    def _components(self, rate: float, hours: float, previous_time, creators: int) -> tuple:
+        """Compute derivatives and causal normalization against the prior state only."""
+        config, state = self.config, self.state
         contiguous = (
             previous_time is not None
             and hours <= config.max_gap_windows * config.window_hours
@@ -258,31 +297,13 @@ class TrendEngine:
             scale = max(1.4826 * median(abs(v - center) for v in logs), 0.25)
             burst = min(max((math.log1p(smoothed) - center) / scale, 0) / 4, 1)
         breadth = percentile(creators, [r["creators"] for r in prior]) if enough else None
-        engagement = mean(self.pending_engagement) if self.pending_engagement else None
-        self.pending_engagement.clear()
-        state.valid_windows += 1
-        state.contiguous_windows = state.contiguous_windows + 1 if slots == 1 else 1
-        state.valid_duration_hours += config.window_hours
-        duration = min(state.valid_duration_hours / 3, 1)
-        confidence = min(
-            0.3 * row["confidence_N"]
-            + 0.2 * row["confidence_D"]
-            + 0.2 * row["freshness"]
-            + 0.2 * row["completeness"]
-            + 0.1 * duration,
-            config.source_cap,
-        )
-        row.update(
-            ewma=smoothed,
-            velocity=velocity,
-            acceleration=acceleration,
-            growth=growth,
-            burst=burst,
-            engagement=engagement,
-            breadth=breadth,
-            confidence_O=duration,
-            confidence=confidence,
-        )
+        return smoothed, velocity, acceleration, growth, burst, breadth
+
+    def _publish(self, row: dict, origins: int, n_eff: float) -> None:
+        """Apply explicit research gates and heuristic lifecycle; production T stays null."""
+        config, state = self.config, self.state
+        growth, burst, breadth = row["growth"], row["burst"], row["breadth"]
+        confidence, engagement, velocity = row["confidence"], row["engagement"], row["velocity"]
         gate = (
             growth is not None
             and burst is not None
@@ -314,9 +335,3 @@ class TrendEngine:
                 state.lifecycle = "COOLING"
             else:
                 state.lifecycle = "WATCHING"
-        row["lifecycle"] = state.lifecycle
-        state.history.append({"ewma": smoothed, "velocity": velocity, "creators": creators})
-        state.history = state.history[-config.baseline_limit :]
-        state.last_timestamp, state.ewma, state.velocity = timestamp, smoothed, velocity
-        self.enricher.prune(end)
-        return row

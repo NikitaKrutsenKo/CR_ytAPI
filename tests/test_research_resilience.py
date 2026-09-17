@@ -202,3 +202,100 @@ def test_replay_rejects_missing_baseline(tmp_path):
     next((experiment / "enrichment").glob("*.json")).unlink()
     with pytest.raises(ValueError, match="Cannot read JSON"):
         ReplayService(tmp_path).run(experiment)
+
+
+def test_formula_defaults_frozen_and_config_tamper_rejected(tmp_path):
+    from research.storage import write_json
+
+    config = ExperimentConfig(
+        Mode.TREND, (CollectionRequest(CandidateTopic.named("AI")),), duration_minutes=0.001
+    )
+    experiment = ExperimentManager(
+        tmp_path,
+        ApiProfiles(tmp_path / "absent", {"YOUTUBE_API_KEY_DEFAULT": "synthetic-only-secret"}),
+        RunClient,
+    ).run(config)
+    metadata = read_json(experiment / "experiment.json")
+    assert metadata["config"]["trend_formula"]["half_life_hours"] == 2
+    assert metadata["config"]["gap_formula"]["epsilon"] == 0.000001
+    assert "synthetic-only-secret" not in (experiment / "experiment.json").read_text()
+    metadata["config"]["trend_formula"]["half_life_hours"] = 99
+    write_json(experiment / "experiment.json", metadata)
+    with pytest.raises(ValueError, match="configuration checksum"):
+        ReplayService(tmp_path).run(experiment)
+
+
+def test_gap_failure_never_removes_trend_data(tmp_path):
+    class FailedBaseline(RunClient):
+        def get(self, resource, params):
+            if resource == "channels":
+                raise YouTubeApiError("Unavailable baseline")
+            return super().get(resource, params)
+
+    request = CollectionRequest(CandidateTopic.named("AI"))
+    config = ExperimentConfig(Mode.COMBINED, (request,), duration_minutes=0.001)
+    experiment = ExperimentManager(
+        tmp_path, ApiProfiles(tmp_path / "absent", {"YOUTUBE_API_KEY_DEFAULT": "fake"}), FailedBaseline
+    ).run(config)
+    assert (experiment / "results" / request.topic.topic_id / "trend.jsonl").exists()
+    assert read_json(experiment / "summary.json")["gap_snapshots"] == 0
+    assert read_json(experiment / "summary.json")["raw_observations"] == 1
+
+
+def test_engagement_same_age_cohorts_and_delta_eligibility():
+    from research.tracking import CounterDelta
+
+    engine = TrendEngine()
+
+    def delta(like, comment, age="0_24h"):
+        return CounterDelta("v", iso(NOW), 1, 1000, 50, 10, 1000, 50, 10, like, comment, False, age)
+
+    assert engine.engagement([delta(0.04, 0.005)]) is None
+    assert engine.engagement([delta(0.05, 0.008)]) == 1
+    assert engine.engagement([delta(0.05, 0.008, "168h_plus")]) is None
+    assert engine.engagement([replace(delta(0.05, 0.008), correction=True)]) is None
+
+
+def test_product_search_estimate_uses_largest_page_count(tmp_path):
+    requests = (
+        CollectionRequest(CandidateTopic.named("A"), page_size=1, max_pages=100),
+        CollectionRequest(CandidateTopic.named("B"), page_size=50, max_pages=3),
+    )
+    config = ExperimentConfig(Mode.PRODUCT, requests, max_retries=0, search_budget=1000, other_budget=100000)
+    estimate = QuotaManager(tmp_path / "quota.sqlite", "DEFAULT", 1000, 100000).estimate(config)
+    assert estimate.search_calls == 100
+
+
+def test_search_quota_stop_preserves_available_counter_tracking(tmp_path):
+    clients = []
+
+    class SearchLimited(RunClient):
+        searches = 0
+
+        def get(self, resource, params):
+            if resource == "search":
+                self.searches += 1
+                if self.searches > 1:
+                    raise QuotaStopped("Synthetic search pool exhausted")
+            return super().get(resource, params)
+
+    def factory(*args, **kwargs):
+        client = SearchLimited()
+        clients.append(client)
+        return client
+
+    request = CollectionRequest(CandidateTopic.named("AI"))
+    config = ExperimentConfig(
+        Mode.TREND,
+        (request,),
+        duration_minutes=0.009,
+        discovery_minutes=0.002,
+        tracking_minutes=0.002,
+        max_retries=0,
+    )
+    experiment = ExperimentManager(
+        tmp_path, ApiProfiles(tmp_path / "absent", {"YOUTUBE_API_KEY_DEFAULT": "fake"}), factory
+    ).run(config)
+    assert clients[0].searches == 2
+    assert sum(resource == "videos" for resource, _ in clients[0].calls) >= 2
+    assert read_json(experiment / "summary.json")["status"] == "QUOTA_STOPPED"

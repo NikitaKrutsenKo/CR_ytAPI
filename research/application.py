@@ -5,6 +5,7 @@ from pathlib import Path
 from threading import Event
 
 from metrics.calculators import MetricConfig
+from research.configuration import resolve_formulas
 from research.domain import ExperimentConfig
 from research.execution import ExperimentRun
 from research.profiles import ApiProfiles
@@ -41,6 +42,7 @@ class ExperimentManager:
         notify: Callable[[dict], None] = lambda event: None,
     ) -> Path:
         config.validate()
+        config = resolve_formulas(config)
         secret = self.profiles.resolve(config.api_profile_name)
         quota = self.quota(config)
         estimate = quota.estimate(config)

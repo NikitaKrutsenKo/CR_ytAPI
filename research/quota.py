@@ -95,7 +95,11 @@ class QuotaManager:
     def estimate(self, config: ExperimentConfig) -> QuotaEstimate:
         """Conservative full-run plan: cold creator caches and all retries each cycle."""
         config.validate()
-        cycles = math.ceil(config.duration_minutes / config.discovery_minutes)
+        cycles = (
+            1
+            if config.mode == Mode.HISTORICAL
+            else math.ceil(config.duration_minutes / config.discovery_minutes)
+        )
         requests = config.requests
         if config.mode == Mode.PRODUCT:
             requests = (max(requests, key=lambda r: r.page_size * r.max_pages),)
