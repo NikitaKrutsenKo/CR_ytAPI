@@ -1,0 +1,1 @@
+{"formula_version":"youtube_activity_research_conservative_v1","window_hours":1.0,"half_life_hours":4.0,"slope_floor":0.08,"baseline_min_windows":6,"baseline_limit":168,"max_gap_windows":2.0,"source_cap":0.6,"rising_score":60.0,"breakout_score":85.0,"min_support":30.0,"min_creators":8}
