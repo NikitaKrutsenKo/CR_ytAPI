@@ -30,3 +30,6 @@ Historical publication search only returns present-day counters; never backdate 
 Search caps and partial failures are sampling limitations, not zero activity.
 Quota is a local estimate shared by selected profile; external usage is unknowable.
 No remote mutations, pushes or PRs are permitted.
+
+## Specification resolved during audit
+The user supplied MathCore/CreatorRadar_TrendEngine_Diploma_Expanded.ipynb. Its formulas and explicit YouTube research adaptations are documented in FORMULAS.md. The earlier missing-specification risk was resolved; the production multi-platform input limitation remains.
