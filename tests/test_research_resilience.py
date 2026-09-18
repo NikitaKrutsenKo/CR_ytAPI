@@ -299,3 +299,55 @@ def test_search_quota_stop_preserves_available_counter_tracking(tmp_path):
     assert clients[0].searches == 2
     assert sum(resource == "videos" for resource, _ in clients[0].calls) >= 2
     assert read_json(experiment / "summary.json")["status"] == "QUOTA_STOPPED"
+
+
+def test_freshness_uses_last_success_not_last_attempt():
+    engine = TrendEngine()
+    first = make_trend_bundle(12, 20)
+    first = replace(first, metadata=replace(first.metadata, finished_at=iso(NOW)))
+    engine.process(first)
+    for hour in (13, 14):
+        failed = make_trend_bundle(hour, 0, Status.FAILED)
+        failed = replace(
+            failed, metadata=replace(failed.metadata, finished_at=iso(NOW + timedelta(hours=hour - 12)))
+        )
+        result = engine.process(failed)
+    assert result["freshness"] == pytest.approx(0.5)
+    assert result["youtube_activity_count"] is None
+
+
+def test_deadline_checked_between_http_requests(tmp_path, monkeypatch):
+    elapsed = [0.0]
+    monkeypatch.setattr("time.monotonic", lambda: elapsed[0])
+    calls = []
+
+    class Response:
+        ok = True
+        status_code = 200
+
+        def json(self):
+            item = video()
+            item["id"] = {"videoId": "v"}
+            return {"items": [item]}
+
+    class Session:
+        def get(self, *args, **kwargs):
+            calls.append(1)
+            elapsed[0] += 2.0
+            return Response()
+
+        def close(self):
+            pass
+
+    def factory(*args, **kwargs):
+        return YouTubeClient(*args, session=Session(), **kwargs)
+
+    request = CollectionRequest(CandidateTopic.named("AI"))
+    config = ExperimentConfig(Mode.TREND, (request,), duration_minutes=0.01, max_retries=0)
+    experiment = ExperimentManager(
+        tmp_path, ApiProfiles(tmp_path / "absent", {"YOUTUBE_API_KEY_DEFAULT": "fake"}), factory
+    ).run(config)
+    assert len(calls) == 1
+    from research.storage import TopicWorkspaceManager
+
+    assert next(TopicWorkspaceManager(tmp_path).bundles(experiment)).metadata.status == Status.CANCELLED

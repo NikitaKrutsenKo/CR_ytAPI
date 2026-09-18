@@ -58,6 +58,7 @@ class TrendState:
     """State belongs to one topic, source plan and formula snapshot."""
 
     last_timestamp: str | None = None
+    last_success_time: str | None = None
     ewma: float | None = None
     velocity: float | None = None
     valid_duration_hours: float = 0.0
@@ -114,7 +115,7 @@ class TrendEnricher:
 
 
 class TrendEngine:
-    """Deterministic YouTube components following MathCore notebook v2 sections 4Р Р†Р вЂљРІР‚Сљ12.
+    """Deterministic YouTube components following MathCore notebook v2 sections 4-12.
 
     Query search has no incidence denominator. Components use a explicitly versioned
     publication-activity proxy. Production Trend Score stays null because Reddit,
@@ -202,7 +203,19 @@ class TrendEngine:
             "confidence_D": 0.5 * min(origins / 10, 1) + 0.5 / 3,
             "freshness": 1.0
             if valid
-            else (2 ** (-hours / config.half_life_hours) if state.ewma is not None else 0.0),
+            else (
+                2
+                ** (
+                    -max(
+                        0,
+                        (utc(bundle.metadata.finished_at) - utc(state.last_success_time)).total_seconds()
+                        / 3600,
+                    )
+                    / config.half_life_hours
+                )
+                if state.last_success_time
+                else 0.0
+            ),
             "completeness": (state.valid_windows + int(valid)) / state.expected_windows,
             "confidence_O": None,
             "confidence": None,
@@ -255,6 +268,7 @@ class TrendEngine:
         state.history.append({"ewma": smoothed, "velocity": velocity, "creators": creators})
         state.history = state.history[-config.baseline_limit :]
         state.last_timestamp, state.ewma, state.velocity = timestamp, smoothed, velocity
+        state.last_success_time = bundle.metadata.finished_at
         self.enricher.prune(end)
         return row
 

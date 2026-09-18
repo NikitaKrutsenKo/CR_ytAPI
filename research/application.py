@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from pathlib import Path
 from threading import Event
@@ -60,5 +61,6 @@ class ExperimentManager:
             cancelled=stop.is_set,
         )
         run = ExperimentRun(config, self.store, experiment, client, quota, estimate, stop, notify)
+        client.cancelled = lambda: stop.is_set() or time.monotonic() >= run.deadline
         run.execute()
         return experiment

@@ -72,7 +72,7 @@ class ExperimentRun:
         try:
             while not self.stop.is_set() and time.monotonic() < self.deadline:
                 for operation, request in self._jobs(time.monotonic()):
-                    if self.stop.is_set():
+                    if self.stop.is_set() or time.monotonic() >= self.deadline:
                         break
                     self._cycle(operation, request)
                 if self.config.mode == Mode.HISTORICAL or self._no_work_remaining():

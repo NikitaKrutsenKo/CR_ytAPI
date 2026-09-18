@@ -1,6 +1,6 @@
 # Implementation report — CreatorRadar Research Console
 
-Date: 2026-09-17.
+Date: 2026-09-18.
 
 Local project: `F:\!Life\Business\CreatorRadar\CR_API`.
 
@@ -43,7 +43,7 @@ The local `.venv` was created and runtime/development dependencies installed. No
 ## Verification evidence
 
 - Original baseline: 12 tests passed before feature development.
-- Final suite: **50 passed**, including original regressions, ingestion failures, quota resets/guards, cache behavior, scientific time/normalization behavior, all major modes, raw/config/baseline integrity, replay and offscreen GUI integration.
+- Final suite: **52 passed**, including original regressions, ingestion failures, quota resets/guards, cache behavior, scientific time/normalization behavior, all major modes, raw/config/baseline integrity, replay and offscreen GUI integration.
 - `ruff check research youtube/client.py youtube/search.py youtube/videos.py tests/test_research*.py`: passed.
 - `compileall` over research and existing source packages: passed.
 - `python -m research --help`: passed.
@@ -216,9 +216,10 @@ A	docs/FORMULAS.md
 A	docs/IMPLEMENTATION_REPORT.md
 ```
 
-## Local implementation commits before the documentation commit
+## Local implementation commits before the final verification commit
 
 ```text
+b1e9562 docs: document research architecture, formula provenance and Windows workflows
 1fe51d9 fix: freeze formula defaults and verify reproducible replay configuration
 7b13874 feat: add desktop experiment console, analytics and replay comparison
 6cb03cc refactor: encapsulate run lifecycle and harden scientific data boundaries
@@ -229,4 +230,4 @@ A	docs/IMPLEMENTATION_REPORT.md
 fd32d26 docs: record research architecture audit and migration plan
 ```
 
-The subsequent local documentation commit contains this report. To see its own hash and the full final history, run `git log --oneline --decorate --graph -30`.
+The final local verification commit updates deadline/freshness safeguards and this report. Run `git log --oneline --decorate --graph -30` for the final hash.

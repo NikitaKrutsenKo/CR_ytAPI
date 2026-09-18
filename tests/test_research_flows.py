@@ -112,6 +112,7 @@ def make_trend_bundle(hour=12, count=30, status=Status.COMPLETE):
         metadata=replace(
             bundle.metadata,
             timestamp=iso(end),
+            finished_at=iso(end),
             effective_from=iso(end - timedelta(hours=24)),
             effective_to=iso(end),
             status=status,
