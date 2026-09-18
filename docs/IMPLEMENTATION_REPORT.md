@@ -6,7 +6,7 @@ Local project: `F:\!Life\Business\CreatorRadar\CR_API`.
 
 Local feature branch: `research_gui_trend_gap`.
 
-Base: the existing local `origin/alpha_test` ref. `main` was not used as the development base. The repository was not cloned. Existing `.idea` files were preserved. No push, PR, remote branch, tag or release operation was performed.
+Base: the existing local `origin/alpha_test` ref. `main` was not used as the development base. The repository was not cloned. Existing `.idea` files were preserved. Four schema-1 files already tracked by the base under `data/` were also preserved unchanged; the runtime ignore rules apply to new artifacts, not removal of the historical files. No push, PR, remote branch, tag or release operation was performed.
 
 ## Delivered application
 
@@ -230,4 +230,4 @@ b1e9562 docs: document research architecture, formula provenance and Windows wor
 fd32d26 docs: record research architecture audit and migration plan
 ```
 
-The final local verification commit updates deadline/freshness safeguards and this report. Run `git log --oneline --decorate --graph -30` for the final hash.
+Final code verification commit: `8b118bd` (deadline/freshness safeguards). The following documentation-only commit clarifies preserved baseline data. Run `git log --oneline --decorate --graph -30` for the final hash.
