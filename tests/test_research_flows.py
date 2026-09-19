@@ -52,7 +52,7 @@ def test_live_modes_shared_discovery_and_offline_replay(tmp_path, mode, has_gap,
         clients.append(client)
         return client
 
-    config = ExperimentConfig(mode, (CollectionRequest(CandidateTopic.named("AI")),), duration_minutes=0.001)
+    config = ExperimentConfig(mode, (CollectionRequest(CandidateTopic.named("AI")),), duration_hours=0.001 / 60)
     manager = ExperimentManager(
         tmp_path, ApiProfiles(tmp_path / ".env", {"YOUTUBE_API_KEY_DEFAULT": "fake"}), factory
     )

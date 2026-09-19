@@ -307,6 +307,8 @@ pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python,visualstudiocode,pycharm
 .idea/
+.testdeps/
+.testenv/
 *.iml
 data/
 experiments/

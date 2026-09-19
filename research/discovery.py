@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import timedelta
 from uuid import uuid4
 
 from research.domain import (
@@ -11,6 +12,7 @@ from research.domain import (
     Status,
     VideoIdentity,
     VideoObservation,
+    WindowResolution,
     fingerprint,
     iso,
     now_utc,
@@ -49,16 +51,37 @@ class YouTubeDiscoveryCollector:
         self.search = YouTubeSearchService(client)
         self.videos = YouTubeVideoService(client)
 
-    def collect(self, request: CollectionRequest, last_success=None, now=None) -> CollectionBundle:
+    def collect(
+        self,
+        request: CollectionRequest,
+        last_success=None,
+        now=None,
+        *,
+        window: WindowResolution | None = None,
+        minimum_video_age_hours: float = 0.0,
+        minimum_views: int = 0,
+    ) -> CollectionBundle:
         now = now or now_utc()
-        start, end, effective = request.bounds(now, last_success)
+        if window is None:
+            start, end, effective = request.bounds(
+                now, last_success, minimum_video_age_hours=minimum_video_age_hours
+            )
+        else:
+            start, end = window.effective_from, window.effective_to
+            effective = start
+            if last_success and request.window_mode == "ROLLING":
+                effective = max(start, utc(last_success) - timedelta(minutes=request.overlap_minutes))
+            if effective >= end:
+                raise ValueError("Discovery watermark is outside the current eligible window")
         started = time.monotonic()
         telemetry_start = len(self.client.telemetry)
         identities, observations, warnings = {}, [], []
+        detail_video_ids = set()
         received = pages = requested = 0
         token = None
         tokens = set()
         status, truncated = Status.COMPLETE, False
+        excluded_too_young = excluded_low_views = excluded_missing_views = 0
         try:
             for _ in range(request.max_pages):
                 requested += 1
@@ -106,10 +129,23 @@ class YouTubeDiscoveryCollector:
                 timestamp = iso(now_utc())
                 for item in details:
                     try:
-                        observations.append(observation(item, timestamp))
+                        detail_video_ids.add(item["id"])
+                        row = observation(item, timestamp)
+                        published = utc(row.identity.published_at)
+                        if published < start or published > end:
+                            excluded_too_young += 1
+                            warnings.append(f"OUTSIDE_EFFECTIVE_WINDOW:{row.identity.video_id}")
+                        elif row.views is None and minimum_views > 0:
+                            excluded_missing_views += 1
+                            warnings.append(f"MISSING_VIEW_COUNT:{row.identity.video_id}")
+                        elif row.views is not None and row.views < minimum_views:
+                            excluded_low_views += 1
+                            warnings.append(f"LOW_VIEW_COUNT:{row.identity.video_id}")
+                        else:
+                            observations.append(row)
                     except (ValueError, KeyError, TypeError):
                         warnings.append("Malformed video statistics omitted")
-            if len(observations) < len(identities):
+            if len(detail_video_ids) < len(identities):
                 status = Status.PARTIAL
                 warnings.append("Some discovered videos are unavailable")
         except (QuotaStopped, YouTubeQuotaExceeded) as exc:
@@ -122,31 +158,38 @@ class YouTubeDiscoveryCollector:
             warnings.append(str(exc))
         finished = now_utc()
         metadata = CollectionMetadata(
-            uuid4().hex,
-            iso(now),
-            request.topic.canonical_name,
-            iso(start),
-            iso(end),
-            iso(effective),
-            iso(end),
-            request.window_mode,
-            request.rolling_hours,
-            request.page_size,
-            request.max_pages,
-            requested,
-            pages,
-            received,
-            len(identities),
-            max(0, received - len(identities) - sum(w.startswith("Malformed discovery") for w in warnings)),
-            self.client.profile,
-            iso(now),
-            iso(finished),
-            (time.monotonic() - started) * 1000,
-            status,
+            batch_id=uuid4().hex,
+            timestamp=iso(now),
+            query=request.topic.canonical_name,
+            requested_from=iso(window.requested_from if window else start),
+            requested_to=iso(window.requested_to if window else end),
+            effective_from=iso(effective),
+            effective_to=iso(end),
+            window_mode=request.window_mode,
+            rolling_window_hours=(end - start).total_seconds() / 3600,
+            page_size=request.page_size,
+            max_pages=request.max_pages,
+            pages_requested=requested,
+            pages_received=pages,
+            items_received=received,
+            unique_video_count=len(identities),
+            duplicates_removed=max(0, received - len(identities) - sum(w.startswith("Malformed discovery") for w in warnings)),
+            api_profile_name=self.client.profile,
+            started_at=iso(now),
+            finished_at=iso(finished),
+            duration_ms=(time.monotonic() - started) * 1000,
+            status=status,
             truncated=truncated,
             config_hash=fingerprint(request),
             aliases=request.topic.aliases,
             order=request.order,
+            minimum_video_age_hours=minimum_video_age_hours,
+            minimum_views=minimum_views,
+            discovered_video_count=len(identities),
+            eligible_video_count=len(observations),
+            excluded_too_young_count=excluded_too_young,
+            excluded_low_views_count=excluded_low_views,
+            excluded_missing_views_count=excluded_missing_views,
         )
         log.info(
             "collection_completed batch_id=%s topic_id=%s status=%s unique=%s",

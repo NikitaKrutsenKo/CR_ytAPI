@@ -31,7 +31,7 @@ def test_gui_run_config_worker_and_analytics(tmp_path, app):
     window = ResearchConsole(tmp_path)
     profiles = ApiProfiles(tmp_path / "absent", {"YOUTUBE_API_KEY_DEFAULT": "fake"})
     window.manager = ExperimentManager(tmp_path, profiles, RunClient)
-    window.form.duration.setValue(0.01)
+    window.form.duration.setValue(0.01 / 60)
     window.form.mode.setCurrentText("Combined Research")
     config = window.form.config()
     assert config.requests[0].requested_from.endswith("Z")

@@ -13,7 +13,7 @@ from youtube.videos import YouTubeVideoService
 NOW = datetime(2026, 9, 17, 12, tzinfo=UTC)
 
 
-def video(identifier="v", channel="c", views=100):
+def video(identifier="v", channel="c", views=1000):
     return {
         "id": identifier,
         "snippet": {"channelId": channel, "publishedAt": "2026-09-17T11:00:00Z", "title": identifier},

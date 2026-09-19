@@ -57,6 +57,7 @@ class Status(StrEnum):
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
     QUOTA_STOPPED = "QUOTA_STOPPED"
+    WAITING_FOR_QUOTA = "WAITING_FOR_QUOTA"
 
 
 @dataclass(frozen=True)
@@ -83,11 +84,10 @@ class CandidateTopic:
 
 @dataclass(frozen=True)
 class CollectionRequest:
-    """Static bounds or rolling window, plus incremental discovery overlap."""
+    """Requested publication range; rolling width is derived from its endpoints."""
 
     topic: CandidateTopic
     window_mode: str = "ROLLING"
-    rolling_hours: float = 24.0
     requested_from: str | None = None
     requested_to: str | None = None
     page_size: int = 50
@@ -95,19 +95,21 @@ class CollectionRequest:
     overlap_minutes: float = 5.0
     order: str = "date"
 
-    def bounds(self, now: datetime, last_success: str | None = None) -> tuple[datetime, datetime, datetime]:
-        now = utc(now)
+    def bounds(
+        self,
+        now: datetime,
+        last_success: str | None = None,
+        minimum_video_age_hours: float = 0.0,
+        elapsed_seconds: float = 0.0,
+        initial: WindowResolution | None = None,
+    ) -> tuple[datetime, datetime, datetime]:
+        resolved = WindowResolver.resolve(
+            self, now, minimum_video_age_hours, elapsed_seconds=elapsed_seconds, initial=initial
+        )
+        start, end = resolved.effective_from, resolved.effective_to
         if not 1 <= self.page_size <= 50 or self.max_pages < 1:
             raise ValueError("Page size must be 1..50 and max pages positive")
-        if self.window_mode == "STATIC":
-            start, end = utc(self.requested_from or ""), utc(self.requested_to or "")
-        elif self.window_mode == "ROLLING":
-            if not math.isfinite(self.rolling_hours) or self.rolling_hours <= 0:
-                raise ValueError("Rolling hours must be positive and finite")
-            start, end = now - timedelta(hours=self.rolling_hours), now
-        else:
-            raise ValueError("Unknown window mode")
-        if start >= end or self.overlap_minutes < 0:
+        if self.overlap_minutes < 0:
             raise ValueError("Invalid collection time window")
         effective = start
         if last_success and self.window_mode == "ROLLING":
@@ -115,6 +117,83 @@ class CollectionRequest:
         if effective >= end:
             raise ValueError("Discovery watermark is in the future")
         return start, end, effective
+
+
+@dataclass(frozen=True)
+class WindowResolution:
+    requested_from: datetime
+    requested_to: datetime
+    effective_from: datetime
+    effective_to: datetime
+    latest_allowed_to: datetime
+    window_width_seconds: float
+    minimum_video_age_hours: float
+    was_capped: bool
+    cap_reason: str | None = None
+    elapsed_seconds: float = 0.0
+
+
+class WindowResolver:
+    """Single publication-window policy used by preview and live collection."""
+
+    @staticmethod
+    def resolve(
+        request: CollectionRequest,
+        now: datetime,
+        minimum_video_age_hours: float,
+        *,
+        elapsed_seconds: float = 0.0,
+        initial: WindowResolution | None = None,
+    ) -> WindowResolution:
+        now = utc(now)
+        if not math.isfinite(minimum_video_age_hours) or minimum_video_age_hours < 0:
+            raise ValueError("Minimum video age must be non-negative and finite")
+        if request.window_mode not in {"STATIC", "ROLLING"}:
+            raise ValueError("Unknown window mode")
+        if initial is not None:
+            delta = timedelta(seconds=elapsed_seconds if request.window_mode == "ROLLING" else 0)
+            return WindowResolution(
+                initial.requested_from,
+                initial.requested_to,
+                initial.effective_from + delta,
+                initial.effective_to + delta,
+                now - timedelta(hours=minimum_video_age_hours),
+                initial.window_width_seconds,
+                minimum_video_age_hours,
+                initial.was_capped,
+                initial.cap_reason,
+                elapsed_seconds,
+            )
+        latest = now - timedelta(hours=minimum_video_age_hours)
+        if request.window_mode == "ROLLING" and (not request.requested_from or not request.requested_to):
+            end, start = latest, latest - timedelta(hours=24)
+        else:
+            start, end = utc(request.requested_from or ""), utc(request.requested_to or "")
+        if start >= end:
+            raise ValueError("From must be earlier than To")
+        width = (end - start).total_seconds()
+        capped = end > latest
+        effective_to = min(end, latest)
+        effective_from = effective_to - timedelta(seconds=width) if capped and request.window_mode == "ROLLING" else start
+        if effective_from >= effective_to:
+            raise ValueError("Effective From must be earlier than effective To after minimum-age capping")
+        reason = (
+            f"Selected To was capped by minimum video age ({minimum_video_age_hours:g}h); "
+            + ("the entire rolling range was shifted to preserve its width" if request.window_mode == "ROLLING" else "From remains fixed")
+            if capped
+            else None
+        )
+        return WindowResolution(
+            start,
+            end,
+            effective_from,
+            effective_to,
+            latest,
+            width,
+            minimum_video_age_hours,
+            capped,
+            reason,
+        )
 
 
 @dataclass(frozen=True)
@@ -170,6 +249,13 @@ class CollectionMetadata:
     estimated_quota_cost: dict[str, int] = field(default_factory=dict)
     trend_formula_version: str = ""
     gap_formula_version: str = ""
+    minimum_video_age_hours: float = 0.0
+    minimum_views: int = 0
+    discovered_video_count: int = 0
+    eligible_video_count: int = 0
+    excluded_too_young_count: int = 0
+    excluded_low_views_count: int = 0
+    excluded_missing_views_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -228,9 +314,12 @@ class ExperimentConfig:
     mode: Mode
     requests: tuple[CollectionRequest, ...]
     api_profile_name: str = "DEFAULT"
-    duration_minutes: float = 1.0
+    duration_hours: float = 1.0
     discovery_minutes: float = 30.0
     tracking_minutes: float = 15.0
+    endless_mode: bool = False
+    minimum_video_age_hours: float = 1.0
+    minimum_views: int = 1000
     baseline_min: int = 5
     baseline_max: int = 10
     baseline_ttl_hours: float = 12.0
@@ -248,15 +337,20 @@ class ExperimentConfig:
         if not self.requests or len({r.topic.topic_id for r in self.requests}) != len(self.requests):
             raise ValueError("Provide at least one distinct topic")
         for request in self.requests:
-            request.bounds(now_utc())
+            request.bounds(now_utc(), minimum_video_age_hours=self.minimum_video_age_hours)
         for value in (
-            self.duration_minutes,
             self.discovery_minutes,
             self.tracking_minutes,
             self.baseline_ttl_hours,
         ):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError("Durations and intervals must be positive and finite")
+        if not self.endless_mode and (not math.isfinite(self.duration_hours) or self.duration_hours <= 0):
+            raise ValueError("Duration hours must be positive and finite for a finite experiment")
+        if not math.isfinite(self.minimum_video_age_hours) or self.minimum_video_age_hours < 0:
+            raise ValueError("Minimum video age must be non-negative and finite")
+        if isinstance(self.minimum_views, bool) or not isinstance(self.minimum_views, int) or self.minimum_views < 0:
+            raise ValueError("Minimum views must be a non-negative integer")
         if not 1 <= self.baseline_min <= self.baseline_max <= 50 or self.baseline_pages < 1:
             raise ValueError("Invalid creator baseline settings")
         if not 0 <= self.exploration_fraction <= 1 or not 0 <= self.reserve_percent < 100:
@@ -272,10 +366,26 @@ class ExperimentConfig:
     @classmethod
     def from_dict(cls, raw: dict) -> ExperimentConfig:
         raw = dict(raw)
+        if "duration_hours" not in raw:
+            raw["duration_hours"] = float(raw.pop("duration_minutes", 60.0)) / 60.0
+        else:
+            raw.pop("duration_minutes", None)
+        minimum_age = float(raw.get("minimum_video_age_hours", 1.0))
         raw["mode"] = Mode(raw["mode"])
-        raw["requests"] = tuple(
-            CollectionRequest(**{**r, "topic": CandidateTopic(**r["topic"])}) for r in raw["requests"]
-        )
+        requests = []
+        for value in raw["requests"]:
+            request = dict(value)
+            legacy_hours = request.pop("rolling_hours", None)
+            if request.get("window_mode") == "ROLLING" and (
+                not request.get("requested_from") or not request.get("requested_to")
+            ):
+                hours = float(legacy_hours if legacy_hours is not None else 24.0)
+                end = now_utc() - timedelta(hours=minimum_age)
+                request["requested_to"] = iso(end)
+                request["requested_from"] = iso(end - timedelta(hours=hours))
+            request["topic"] = CandidateTopic(**request["topic"])
+            requests.append(CollectionRequest(**request))
+        raw["requests"] = tuple(requests)
         result = cls(**raw)
         result.validate()
         return result

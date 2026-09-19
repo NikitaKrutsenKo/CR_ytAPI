@@ -183,7 +183,7 @@ def test_historical_flow_no_baselines_or_fake_counters(tmp_path):
 
 def test_product_mode_report_and_selection(tmp_path):
     requests = tuple(CollectionRequest(CandidateTopic.named(n)) for n in ("AI", "Gaming"))
-    config = ExperimentConfig(Mode.PRODUCT, requests, duration_minutes=0.001)
+    config = ExperimentConfig(Mode.PRODUCT, requests, duration_hours=0.001 / 60)
     experiment = ExperimentManager(
         tmp_path, ApiProfiles(tmp_path / "absent", {"YOUTUBE_API_KEY_DEFAULT": "fake"}), RunClient
     ).run(config)
@@ -195,7 +195,7 @@ def test_product_mode_report_and_selection(tmp_path):
 
 def test_replay_rejects_missing_baseline(tmp_path):
     request = CollectionRequest(CandidateTopic.named("AI"))
-    config = ExperimentConfig(Mode.GAP, (request,), duration_minutes=0.001)
+    config = ExperimentConfig(Mode.GAP, (request,), duration_hours=0.001 / 60)
     experiment = ExperimentManager(
         tmp_path, ApiProfiles(tmp_path / "absent", {"YOUTUBE_API_KEY_DEFAULT": "fake"}), RunClient
     ).run(config)
@@ -208,7 +208,7 @@ def test_formula_defaults_frozen_and_config_tamper_rejected(tmp_path):
     from research.storage import write_json
 
     config = ExperimentConfig(
-        Mode.TREND, (CollectionRequest(CandidateTopic.named("AI")),), duration_minutes=0.001
+        Mode.TREND, (CollectionRequest(CandidateTopic.named("AI")),), duration_hours=0.001 / 60
     )
     experiment = ExperimentManager(
         tmp_path,
@@ -233,7 +233,7 @@ def test_gap_failure_never_removes_trend_data(tmp_path):
             return super().get(resource, params)
 
     request = CollectionRequest(CandidateTopic.named("AI"))
-    config = ExperimentConfig(Mode.COMBINED, (request,), duration_minutes=0.001)
+    config = ExperimentConfig(Mode.COMBINED, (request,), duration_hours=0.001 / 60)
     experiment = ExperimentManager(
         tmp_path, ApiProfiles(tmp_path / "absent", {"YOUTUBE_API_KEY_DEFAULT": "fake"}), FailedBaseline
     ).run(config)
@@ -288,7 +288,7 @@ def test_search_quota_stop_preserves_available_counter_tracking(tmp_path):
     config = ExperimentConfig(
         Mode.TREND,
         (request,),
-        duration_minutes=0.009,
+        duration_hours=0.009 / 60,
         discovery_minutes=0.002,
         tracking_minutes=0.002,
         max_retries=0,
@@ -343,7 +343,7 @@ def test_deadline_checked_between_http_requests(tmp_path, monkeypatch):
         return YouTubeClient(*args, session=Session(), **kwargs)
 
     request = CollectionRequest(CandidateTopic.named("AI"))
-    config = ExperimentConfig(Mode.TREND, (request,), duration_minutes=0.01, max_retries=0)
+    config = ExperimentConfig(Mode.TREND, (request,), duration_hours=0.01 / 60, max_retries=0)
     experiment = ExperimentManager(
         tmp_path, ApiProfiles(tmp_path / "absent", {"YOUTUBE_API_KEY_DEFAULT": "fake"}), factory
     ).run(config)
