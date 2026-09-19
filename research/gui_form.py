@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import QDateTime, Qt, QTimeZone
 from PySide6.QtWidgets import (
     QComboBox,
+    QCheckBox,
     QDateTimeEdit,
     QDoubleSpinBox,
     QFormLayout,
@@ -18,13 +19,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from research.domain import CandidateTopic, CollectionRequest, ExperimentConfig, Mode, iso
+from research.domain import CandidateTopic, CollectionRequest, ExperimentConfig, Mode, WindowResolver, iso, now_utc
 from research.storage import read_json, write_json
 
 
 def number(value, low=0.01, high=100000, integer=False):
     widget = QSpinBox() if integer else QDoubleSpinBox()
     widget.setRange(low, high)
+    if not integer:
+        widget.setDecimals(4)
     widget.setValue(value)
     return widget
 
@@ -54,8 +57,7 @@ class ExperimentForm(QWidget):
         self.pool.currentTextChanged.connect(self.choose_pool)
         self.window = QComboBox()
         self.window.addItems(["ROLLING", "STATIC"])
-        self.hours = number(24, 0.1, 87600)
-        self.start = QDateTimeEdit(QDateTime.currentDateTimeUtc().addDays(-7))
+        self.start = QDateTimeEdit(QDateTime.currentDateTimeUtc().addDays(-1))
         self.end = QDateTimeEdit(QDateTime.currentDateTimeUtc())
         for field in (self.start, self.end):
             field.setDisplayFormat("yyyy-MM-dd HH:mm 'UTC'")
@@ -63,21 +65,30 @@ class ExperimentForm(QWidget):
             field.setCalendarPopup(True)
         self.pages = number(1, 1, 1000, True)
         self.page_size = number(50, 1, 50, True)
-        self.duration = number(1, 0.01, 525600)
+        self.minimum_age = number(1, 0, 87600)
+        self.minimum_views = number(1000, 0, 2147483647, True)
+        self.duration = number(1, 0.0001, 8760)
+        self.endless = QCheckBox("Run until manually stopped")
         self.discovery = number(30, 0.1, 10080)
         self.tracking = number(15, 0.1, 10080)
+        self.preview = QLabel()
+        self.preview.setWordWrap(True)
+        self.preview.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         for label, widget in (
             ("API profile", self.profile),
             ("Mode", self.mode),
             ("Topic pool", self.pool),
             ("Topics (semicolon separated)", self.topics),
             ("Window", self.window),
-            ("Rolling hours", self.hours),
             ("From", self.start),
             ("To", self.end),
+            ("Minimum video age (hours)", self.minimum_age),
+            ("Minimum views", self.minimum_views),
+            ("Effective window preview", self.preview),
             ("Max pages", self.pages),
             ("Page size", self.page_size),
-            ("Duration (minutes)", self.duration),
+            ("Duration (hours)", self.duration),
+            ("", self.endless),
             ("Discovery interval (minutes)", self.discovery),
             ("Counter tracking (minutes)", self.tracking),
         ):
@@ -116,6 +127,16 @@ class ExperimentForm(QWidget):
         layout.addWidget(note)
         self.window.currentTextChanged.connect(self.update_window)
         self.mode.currentTextChanged.connect(self.update_mode)
+        self.start.dateTimeChanged.connect(self.update_preview)
+        self.end.dateTimeChanged.connect(self.update_preview)
+        self.minimum_age.valueChanged.connect(self.update_preview)
+        self.endless.toggled.connect(self.duration.setDisabled)
+        self.window.setToolTip("STATIC stays fixed. ROLLING moves the whole initial From/To range with elapsed real time.")
+        self.start.setToolTip("Publication-time lower bound for the initial experiment window.")
+        self.end.setToolTip("Publication-time upper bound for the initial experiment window.")
+        self.minimum_age.setToolTip("Excludes the newest part of time without reducing rolling window width.")
+        self.minimum_views.setToolTip("Applied after batched video statistics are retrieved.")
+        self.endless.setToolTip("Ignores Duration; quota exhaustion pauses until the next Pacific reset.")
         self.update_window()
 
     def choose_pool(self, name):
@@ -136,10 +157,38 @@ class ExperimentForm(QWidget):
         self.window.setEnabled(self.mode.currentText() != Mode.HISTORICAL)
 
     def update_window(self):
-        static = self.window.currentText() == "STATIC"
-        self.start.setEnabled(static)
-        self.end.setEnabled(static)
-        self.hours.setEnabled(not static)
+        self.start.setEnabled(True)
+        self.end.setEnabled(True)
+        self.update_preview()
+
+    def update_preview(self):
+        try:
+            request = CollectionRequest(
+                CandidateTopic.named("preview"),
+                window_mode=self.window.currentText(),
+                requested_from=iso(datetime.fromtimestamp(self.start.dateTime().toSecsSinceEpoch(), UTC)),
+                requested_to=iso(datetime.fromtimestamp(self.end.dateTime().toSecsSinceEpoch(), UTC)),
+            )
+            result = WindowResolver.resolve(request, now_utc(), self.minimum_age.value())
+            fmt = lambda value: value.strftime("%Y-%m-%d %H:%M UTC")
+            width = result.window_width_seconds / 3600
+            projection = (
+                f"After +1 real hour: {fmt(result.effective_from + timedelta(hours=1))} → "
+                f"{fmt(result.effective_to + timedelta(hours=1))}"
+                if request.window_mode == "ROLLING"
+                else "Rolling behavior: Fixed — range does not move."
+            )
+            reason = f"\nReason: {result.cap_reason}" if result.cap_reason else ""
+            self.preview.setText(
+                f"Mode: {request.window_mode}\nRequested: {fmt(result.requested_from)} → {fmt(result.requested_to)}\n"
+                f"Effective initial range: {fmt(result.effective_from)} → {fmt(result.effective_to)}\n"
+                f"Derived width: {width:g}h\nMinimum age: {result.minimum_video_age_hours:g}h\n"
+                f"Eligible video age now: approximately {result.minimum_video_age_hours:g}h → "
+                f"{result.minimum_video_age_hours + width:g}h old\nLatest eligible publication: "
+                f"{fmt(result.latest_allowed_to)}\n{projection}{reason}"
+            )
+        except (ValueError, TypeError) as exc:
+            self.preview.setText(f"Invalid window: {exc}")
 
     def config(self) -> ExperimentConfig:
         requests = []
@@ -148,35 +197,37 @@ class ExperimentForm(QWidget):
             topic = CandidateTopic(**{**asdict(topic), "category": self.pool.currentText()})
             requests.append(
                 CollectionRequest(
-                    topic,
-                    self.window.currentText(),
-                    self.hours.value(),
-                    iso(datetime.fromtimestamp(self.start.dateTime().toSecsSinceEpoch(), UTC)),
-                    iso(datetime.fromtimestamp(self.end.dateTime().toSecsSinceEpoch(), UTC)),
-                    self.page_size.value(),
-                    self.pages.value(),
-                    self.overlap.value(),
+                    topic=topic,
+                    window_mode=self.window.currentText(),
+                    requested_from=iso(datetime.fromtimestamp(self.start.dateTime().toSecsSinceEpoch(), UTC)),
+                    requested_to=iso(datetime.fromtimestamp(self.end.dateTime().toSecsSinceEpoch(), UTC)),
+                    page_size=self.page_size.value(),
+                    max_pages=self.pages.value(),
+                    overlap_minutes=self.overlap.value(),
                 )
             )
         config = ExperimentConfig(
             Mode(self.mode.currentText()),
             tuple(requests),
             self.profile.currentText(),
-            self.duration.value(),
-            self.discovery.value(),
-            self.tracking.value(),
-            self.minimum.value(),
-            self.maximum.value(),
-            self.ttl.value(),
-            self.baseline_pages.value(),
-            self.limit.value(),
-            self.exploration.value() / 100,
-            self.search_budget.value(),
-            self.other_budget.value(),
-            self.reserve.value(),
-            self.retries.value(),
-            read_json(self.root / self.gap_formula.text()),
-            read_json(self.root / self.trend_formula.text()),
+            duration_hours=self.duration.value(),
+            discovery_minutes=self.discovery.value(),
+            tracking_minutes=self.tracking.value(),
+            endless_mode=self.endless.isChecked(),
+            minimum_video_age_hours=self.minimum_age.value(),
+            minimum_views=self.minimum_views.value(),
+            baseline_min=self.minimum.value(),
+            baseline_max=self.maximum.value(),
+            baseline_ttl_hours=self.ttl.value(),
+            baseline_pages=self.baseline_pages.value(),
+            tracked_limit=self.limit.value(),
+            exploration_fraction=self.exploration.value() / 100,
+            search_budget=self.search_budget.value(),
+            other_budget=self.other_budget.value(),
+            reserve_percent=self.reserve.value(),
+            max_retries=self.retries.value(),
+            gap_formula=read_json(self.root / self.gap_formula.text()),
+            trend_formula=read_json(self.root / self.trend_formula.text()),
         )
         config.validate()
         return config
@@ -187,7 +238,6 @@ class ExperimentForm(QWidget):
         self.profile.setCurrentText(config.api_profile_name)
         request = config.requests[0]
         self.window.setCurrentText(request.window_mode)
-        self.hours.setValue(request.rolling_hours)
         if request.requested_from:
             self.start.setDateTime(QDateTime.fromString(request.requested_from, Qt.DateFormat.ISODate))
         if request.requested_to:
@@ -196,7 +246,9 @@ class ExperimentForm(QWidget):
             (self.pages, request.max_pages),
             (self.page_size, request.page_size),
             (self.overlap, request.overlap_minutes),
-            (self.duration, config.duration_minutes),
+            (self.duration, config.duration_hours),
+            (self.minimum_age, config.minimum_video_age_hours),
+            (self.minimum_views, config.minimum_views),
             (self.discovery, config.discovery_minutes),
             (self.tracking, config.tracking_minutes),
             (self.minimum, config.baseline_min),
@@ -211,6 +263,8 @@ class ExperimentForm(QWidget):
             (self.retries, config.max_retries),
         ):
             widget.setValue(value)
+        self.endless.setChecked(config.endless_mode)
+        self.update_preview()
         # Imported formulas are materialized separately; raw experiment config stays immutable.
         for kind, values, widget in (
             ("gap", config.gap_formula, self.gap_formula),

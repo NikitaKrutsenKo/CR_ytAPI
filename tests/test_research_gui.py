@@ -34,6 +34,11 @@ def test_gui_run_config_worker_and_analytics(tmp_path, app):
     window.form.duration.setValue(0.01 / 60)
     window.form.mode.setCurrentText("Combined Research")
     config = window.form.config()
+    assert not hasattr(window.form, "hours")
+    assert config.duration_hours == pytest.approx(0.01 / 60, abs=0.0001)
+    assert config.minimum_video_age_hours == 1
+    assert config.minimum_views == 1000
+    assert "Derived width:" in window.form.preview.text()
     assert config.requests[0].requested_from.endswith("Z")
     errors = []
     window.show_error = errors.append
