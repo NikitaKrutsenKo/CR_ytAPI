@@ -231,3 +231,13 @@ fd32d26 docs: record research architecture audit and migration plan
 ```
 
 Final code verification commit: `8b118bd` (deadline/freshness safeguards). The following documentation-only commit clarifies preserved baseline data. Run `git log --oneline --decorate --graph -30` for the final hash.
+
+## Final eligibility/window/endless update
+
+- New canonical configuration uses explicit From/To, `duration_hours`, `minimum_video_age_hours`, `minimum_views`, and `endless_mode`.
+- STATIC bounds stay fixed; too-new To is capped without moving From.
+- ROLLING derives width from From/To, shifts the entire initial range when capped, and advances it by monotonic elapsed runtime.
+- Search identities stay in raw provenance. Batched details are filtered into eligible observations with explicit age/low-view/missing-view diagnostics before any research engine.
+- The GUI has a read-only preview backed by the same resolver as collection. The separate Rolling hours control is removed.
+- Endless mode pauses on local or YouTube daily quota exhaustion, waits for the timezone-aware Pacific reset, and resumes the same experiment ID. Stop remains cancellable during the wait and retry delay.
+- Legacy `duration_minutes` and `rolling_hours` templates migrate when loaded; new saves use canonical fields.

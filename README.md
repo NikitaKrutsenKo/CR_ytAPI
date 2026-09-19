@@ -100,11 +100,11 @@ ResearchConsole (research/gui.py)
 
 ## Modes and exact workflows
 
-**Quick Gap Test:** select DEFAULT, Quick Gap Test, topic `AI laptop`, ROLLING, 24 hours, one page. Estimate, then Run. After the run, select Analytics and `gap: gap_score`, `er_batch`, `pr_batch`, `demand`, `supply`, creator authority or normalization boundaries. The details panel contains all intermediate fields. An ineligible/empty batch produces an explicit warning, not a fabricated score.
+**Quick Gap Test:** select DEFAULT, Quick Gap Test, topic `AI laptop`, ROLLING, explicit From/To bounds, and one page. Their difference is the rolling width; there is no separate Rolling hours field. Estimate, then Run. After the run, select Analytics and `gap: gap_score`, `er_batch`, `pr_batch`, `demand`, `supply`, creator authority or normalization boundaries. The details panel contains all intermediate fields. An ineligible/empty batch produces an explicit warning, not a fabricated score.
 
 `Discovery → raw → cached creator baseline → original GapEngine → Gap metrics`
 
-**Quick Trend Test:** select topic `GTA VI` or a narrower query, Quick Trend Test, ROLLING 24h, duration 240 minutes, discovery 30 minutes, tracking 15 minutes. Review the cost estimate. Increase pages or narrow the query if collection is capped. One short run can show observations; derivatives, causal normalization and publish gates need multiple complete measurement windows.
+**Quick Trend Test:** select topic `GTA VI` or a narrower query, Quick Trend Test, a 24h From/To range, duration 4 hours, discovery 30 minutes, tracking 15 minutes. Review the cost estimate. Increase pages or narrow the query if collection is capped. One short run can show observations; derivatives, causal normalization and publish gates need multiple complete measurement windows.
 
 `Discovery → publication buckets → EWMA / velocity / G / Z / breadth; counters → actual deltas / E_YT → research diagnostics`
 
@@ -139,7 +139,7 @@ Historical search is a sample, not a complete census. Blank publication buckets 
 - Defaults: 100 search calls/day, 10,000 other read units/day, 10% reserve; all limits are configurable. These reflect the documented granular pools, not the old assumption that every search belongs to a single shared unit pool. Verify your project's actual limits in Google Cloud. [Official overview](https://developers.google.com/youtube/v3/getting-started), [search endpoint](https://developers.google.com/youtube/v3/docs/search/list).
 - Separate SQLite ledger entries by profile and Pacific date. Each attempted call, including failures/retries, is charged before transmission. Concurrent instances share atomic accounting. Local records cannot see usage by other programs or keys in the same Cloud project; do not treat separate profile names as separate projects without checking.
 - Preflight estimates use worst-case cold caches and retry allowance. Runtime guards protect each operation. Search exhaustion stops new discovery; an available read pool may continue registered counter tracking. No automatic switch to another key.
-- Incremental rolling lower bound: `max(window_start, last_complete_uncapped_end - overlap)`. Failed/capped results never advance the watermark.
+- Incremental rolling lower bound: `max(current_window_from, last_complete_uncapped_end - overlap)`. `publishedBefore` is always the current effective To. Failed/capped results never advance the watermark.
 - Search uses `nextPageToken`, configured page caps and repeated-token protection. IDs are unique inside a batch; observations of the same video at different times are preserved.
 - Video/channel detail reads are batched to 50. Creator playlist reads are bounded. Gap caches uploads IDs, selected baseline IDs, raw counters and refresh timestamps for a configurable TTL. Quick Trend and historical publication mode never fetch creator baselines.
 - Retries: only transient HTTP 429/500/502/503/504 or temporary transport failures; exponential delay with jitter, finite attempts. HTTP errors omit URL, body and key.
@@ -158,7 +158,8 @@ data/
     ├── configs/<experiment_id>.json
     └── raw/<batch_id>.json      # immutable schema 2.0 CollectionBundle
 experiments/<experiment_id>/
-├── experiment.json             # immutable full config + hash + versions
+├── experiment.json             # immutable full requested config + hash + versions
+├── runtime.json                # start time and normalized initial effective windows
 ├── topics.json
 ├── inputs.jsonl                # raw references and content checksums
 ├── enrichment/*.json           # captured immutable Gap inputs
@@ -175,7 +176,25 @@ experiments/<experiment_id>/
 
 Metrics and state are scoped to **experiment + topic**, avoiding contamination between formula configurations. The topic directory holds shared raw observations. Raw schema 1 from the original PoC remains readable with the original `python replay.py`; it is not silently converted to schema 2. Original CLI entry points `main.py`, `scheduler.py`, `replay.py`, `build_dataset.py` are retained.
 
-JSON and CSV exports are local. Derived metrics may be recalculated; raw files are exclusive-create and checksum verified. Do not edit raw files to repair a run. Preserve the dataset and logs, fix the reader/migration, then replay into a new result workspace. Automatic restart/resume of a live process is not implemented; completed raw records remain replayable.
+JSON and CSV exports are local. Derived metrics may be recalculated; raw files are exclusive-create and checksum verified. Do not edit raw files to repair a run. Preserve the dataset and logs, fix the reader/migration, then replay into a new result workspace. Endless runs pause in-process on daily quota exhaustion and resume the same experiment after the timezone-aware Pacific reset; process restart recovery remains outside this scope.
+
+## Publication windows and video eligibility
+
+STATIC keeps its effective From/To fixed for the whole run. If selected To is newer than `now - minimum_video_age`, only To is capped; From stays fixed. Run is rejected if that produces an empty interval.
+
+ROLLING uses the selected initial From/To difference as its only window width. If To is too new, the whole range shifts backward, preserving that width. Runtime bounds equal the normalized initial bounds plus monotonic elapsed experiment time, so a 24-hour range remains exactly 24 hours while moving. The form preview and collector use the same `WindowResolver`.
+
+Examples:
+
+- STATIC: Sep 10 00:00 → Sep 12 00:00 never moves.
+- ROLLING: Sep 17 10:00 → Sep 18 10:00 becomes Sep 17 11:00 → Sep 18 11:00 after one real hour.
+- ROLLING with a 24h width and minimum age 1h covers approximately videos 1h through 25h old. The minimum-age gap does not shrink the 24h publication interval.
+
+Search uses both `publishedAfter` and `publishedBefore`. After batched `videos.list`, actual `publishedAt` is checked again. `Minimum views` defaults to 1000 and is inclusive: 999 is excluded; 1000 is eligible. Missing `viewCount` is excluded with `MISSING_VIEW_COUNT` when the threshold is positive. A zero threshold permits a missing view count. Discovery identities remain in raw provenance, while only eligible observations enter Historical, Gap, Trend, tracking registration and Correlator-ready derived results.
+
+Total Duration is stored in hours; discovery and counter-tracking cadences remain minutes. Old `duration_minutes` templates load as hours, and legacy `rolling_hours` templates are materialized as explicit From/To bounds. New saves contain no independent rolling-hours value.
+
+With **Run until manually stopped**, Duration is ignored. Cost preview reports rates per hour and Pacific day rather than a finite total. Local or server-reported daily quota exhaustion enters `WAITING_FOR_QUOTA`, performs no API calls while waiting, keeps Stop active, and resumes the same experiment at the next `America/Los_Angeles` midnight. No API profile/key rotation occurs.
 
 ## Development and tests
 

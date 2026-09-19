@@ -22,7 +22,10 @@
 | Pagination? | `research/discovery.py:YouTubeDiscoveryCollector.collect` for search; `research/gap.py:GapEnricher.enrich` for bounded creator playlists |
 | Dedupe? | Discovery ID dictionary, bounded request ID dedupe in `YouTubeVideoService`; cross-time observations stay separate |
 | CollectionBundle creation? | `YouTubeDiscoveryCollector.collect` and `CollectionService.track` |
-| Time windows/watermark? | `CollectionRequest.bounds`, `CollectionService.discover` |
+| Time windows/watermark? | `WindowResolver.resolve`, `CollectionRequest.bounds`, `CollectionService.discover` |
+| Eligibility? | `YouTubeDiscoveryCollector.collect` after batched video details; raw identities and eligible observations remain separate |
+| Quota wait/resume? | `ExperimentRun._wait_for_quota`; Pacific boundary in `QuotaManager.next_reset` |
+| Legacy duration/window migration? | `ExperimentConfig.from_dict` |
 | Gap enrichment? | `GapEnricher.enrich`; original mathematical engine remains unchanged |
 | Trend enrichment? | `TrendEnricher.ingest/window/covered`; counter input from `TrackedVideoRegistry.observe` |
 | Formulas? | `metrics/engine.py`, `metrics/calculators.py`, `research/trend.py`; provenance in FORMULAS.md |
@@ -75,7 +78,7 @@ Prepare positive/medium/weak/control templates without giving event dates or out
 
 - Raw writes use exclusive creation; replay verifies checksums.
 - Optional counters are missing, not zero. Negative deltas are corrections.
-- Gap eligibility cannot filter a CollectionBundle or Trend input.
+- Shared video eligibility is applied once before all metric branches; Gap-specific creator-baseline eligibility remains separate and cannot mutate Trend input.
 - Repeated observations are retained; only within-discovery IDs are deduplicated.
 - Discovery is the only search workflow. Tracking calls videos only.
 - One run has one profile. No key is persisted or automatically switched.
@@ -91,4 +94,14 @@ Run `python -m pytest -q` after installing requirements-dev.txt. Tests never req
 
 Run the README Ruff command for the new research surface; original PoC modules are intentionally not reformatted wholesale. Follow existing Git constraints: base origin/alpha_test, feature branch only, review diff and stage exact files, keep commits local, preserve .idea and all unrelated work.
 
-Known engineering limits: no automatic process resume, replay initially loads its manifest into memory, no external normalization corpus, coarse age cohorts, bounded heuristic tracking shortlist, and no arbitrary separate-axis chart editor. These are explicit PoC boundaries, not hidden substitutes for unavailable data.
+Known engineering limits: endless quota resume is in-process rather than crash recovery, replay initially loads its manifest into memory, no external normalization corpus, coarse age cohorts, bounded heuristic tracking shortlist, and no arbitrary separate-axis chart editor. These are explicit PoC boundaries, not hidden substitutes for unavailable data.
+
+## Window, eligibility and endless extension points
+
+`WindowResolver` is the single source of truth for GUI preview, initial normalization and live API bounds. It caps STATIC To without moving From, shifts a capped ROLLING range as a unit, and advances rolling bounds from the persisted initial anchor using monotonic elapsed runtime. `runtime.json` records wall-clock start and the initial effective result for audit.
+
+Minimum-age and minimum-view filtering occurs in `YouTubeDiscoveryCollector.collect` after batched details. Add another eligibility rule there after structural/timestamp validation and before constructing the eligible observation tuple. Preserve every discovered `VideoIdentity`, add an explicit exclusion counter/reason, and never encode rejection as a zero-valued observation.
+
+`ExperimentConfig.from_dict` converts legacy `duration_minutes` to canonical `duration_hours` and materializes legacy `rolling_hours` as explicit From/To. New dataclass serialization contains only the canonical representation. Do not migrate immutable historical files in place.
+
+`ExperimentRun._wait_for_quota` records `quota_pause`, exposes expected resume/current windows, waits through the cancellable Stop event, and records `quota_resume`. `QuotaManager.next_reset` uses `America/Los_Angeles`, including DST. Rolling elapsed time is never frozen during this wait.
