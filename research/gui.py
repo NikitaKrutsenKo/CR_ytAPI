@@ -174,9 +174,17 @@ class ResearchConsole(QMainWindow):
             self.quota_text.setPlainText(
                 json.dumps({"plan": encode(estimate), "daily_usage": usage}, indent=2)
             )
-            self.status.setText(
-                f"{estimate.status} • Local estimate: {estimate.search_calls} search calls; {estimate.other_units} other units; includes configured retry allowance."
-            )
+            if estimate.endless:
+                self.status.setText(
+                    f"{estimate.status} • Endless estimate: {estimate.search_calls_per_hour:g} search calls/hour, "
+                    f"{estimate.other_units_per_hour:g} other units/hour; collection pauses at configured quota "
+                    "and resumes after the Pacific reset."
+                )
+            else:
+                self.status.setText(
+                    f"{estimate.status} • Local estimate: {estimate.search_calls} search calls; "
+                    f"{estimate.other_units} other units; includes configured retry allowance."
+                )
             return config
         except (ValueError, TypeError, OSError) as exc:
             self.show_error(str(exc))
@@ -233,6 +241,10 @@ class ResearchConsole(QMainWindow):
         self.status.setText(str(event.get("operation", "Working")) + " • " + str(event.get("status", "")))
         if "quota" in event:
             self.quota_text.setPlainText(json.dumps(event["quota"], indent=2))
+        if event.get("status") == "WAITING_FOR_QUOTA":
+            self.status.setText(
+                "Waiting for quota reset • expected resume: " + str(event.get("expected_resume", "unknown"))
+            )
 
     @Slot(object)
     def on_complete(self, result):

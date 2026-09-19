@@ -17,6 +17,7 @@ from research.domain import (
     VideoIdentity,
     VideoObservation,
     iso,
+    now_utc,
 )
 from research.evaluation import EventEvaluator, HistoricalAnalyzer
 from research.gap import GapEnricher
@@ -35,6 +36,9 @@ class RunClient(FakeClient):
 
     def get(self, resource, params):
         response = super().get(resource, params)
+        for item in response.get("items", []):
+            if "snippet" in item:
+                item["snippet"]["publishedAt"] = iso(now_utc() - timedelta(hours=2))
         if resource == "search":
             response.pop("nextPageToken", None)
         return response

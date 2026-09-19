@@ -9,7 +9,18 @@ from pathlib import Path
 from threading import Event
 
 from research.collection import CollectionService
-from research.domain import CollectionBundle, CollectionRequest, ExperimentConfig, Mode, Status, fingerprint
+from research.domain import (
+    CollectionBundle,
+    CollectionRequest,
+    ExperimentConfig,
+    Mode,
+    Status,
+    WindowResolver,
+    encode,
+    fingerprint,
+    iso,
+    now_utc,
+)
 from research.gap import GapEnricher
 from research.processing import MetricProcessor
 from research.quota import QuotaEstimate, QuotaManager, QuotaStopped
@@ -53,6 +64,11 @@ class ExperimentRun:
             "partial_collections": 0,
             "failures": 0,
             "raw_observations": 0,
+            "discovered_video_count": 0,
+            "eligible_video_count": 0,
+            "excluded_too_young_count": 0,
+            "excluded_low_views_count": 0,
+            "excluded_missing_views_count": 0,
             "warnings": [],
             "topics_monitored": [],
             "unique_videos": 0,
@@ -61,7 +77,22 @@ class ExperimentRun:
         }
         self.unique_videos, self.unique_creators, self.monitored = set(), set(), set()
         self.begin = time.monotonic()
-        self.deadline = self.begin + config.duration_minutes * 60
+        self.started_at = now_utc()
+        self.deadline = float("inf") if config.endless_mode else self.begin + config.duration_hours * 3600
+        self.initial_windows = {
+            request.topic.topic_id: WindowResolver.resolve(
+                request, self.started_at, config.minimum_video_age_hours
+            )
+            for request in config.requests
+        }
+        write_json(
+            self.path / "runtime.json",
+            {
+                "experiment_started_at": iso(self.started_at),
+                "clock": "monotonic elapsed runtime with wall-clock UTC audit timestamps",
+                "initial_windows": {key: encode(value) for key, value in self.initial_windows.items()},
+            },
+        )
         self.next_discovery, self.next_tracking = self.begin, self.begin + config.tracking_minutes * 60
         self.discovery_allowed, self.tracking_allowed = True, True
 
@@ -75,9 +106,12 @@ class ExperimentRun:
                     if self.stop.is_set() or time.monotonic() >= self.deadline:
                         break
                     self._cycle(operation, request)
-                if self.config.mode == Mode.HISTORICAL or self._no_work_remaining():
+                if self.config.mode == Mode.HISTORICAL or (not self.config.endless_mode and self._no_work_remaining()):
                     break
-                self.stop.wait(min(0.25, max(0, self.deadline - time.monotonic())))
+                if self.config.endless_mode and self._no_work_remaining():
+                    self._wait_for_quota()
+                else:
+                    self.stop.wait(min(0.25, max(0, self.deadline - time.monotonic())))
             self.summary["status"] = self._terminal_status()
         except Exception:
             self.summary["status"] = "FAILED"
@@ -120,8 +154,21 @@ class ExperimentRun:
         self.store.event(
             self.path, "collection_started", topic_id=request.topic.topic_id, collection_operation=operation
         )
+        elapsed = time.monotonic() - self.begin
+        window = WindowResolver.resolve(
+            request,
+            now_utc(),
+            self.config.minimum_video_age_hours,
+            elapsed_seconds=elapsed,
+            initial=self.initial_windows[request.topic.topic_id],
+        )
         bundle = (
-            self.collection.discover(request)
+            self.collection.discover(
+                request,
+                window,
+                self.config.minimum_video_age_hours,
+                self.config.minimum_views,
+            )
             if operation == "discovery"
             else self.collection.track(request, self.processor.registry(request.topic.topic_id).ids)
         )
@@ -167,22 +214,54 @@ class ExperimentRun:
                 "status": bundle.metadata.status,
                 "rows": rows,
                 "quota": self.quota.usage(),
+                "current_window": encode(window) if operation == "discovery" else None,
             }
         )
         if bundle.metadata.status == Status.QUOTA_STOPPED:
-            if operation == "discovery":
+            if self.config.endless_mode:
+                self.discovery_allowed = self.tracking_allowed = False
+            elif operation == "discovery":
                 self.discovery_allowed = False
             else:
                 self.tracking_allowed = False
 
+    def _wait_for_quota(self) -> None:
+        resume = self.quota.next_reset()
+        self.summary["status"] = Status.WAITING_FOR_QUOTA
+        self.store.event(self.path, "quota_pause", expected_resume=iso(resume))
+        self.notify(
+            {
+                "operation": "quota_wait",
+                "status": Status.WAITING_FOR_QUOTA,
+                "expected_resume": iso(resume),
+                "last_successful_collection": self.summary.get("last_successful_collection"),
+            }
+        )
+        while not self.stop.is_set() and self.quota.seconds_until_reset() > 0:
+            self.stop.wait(min(1.0, self.quota.seconds_until_reset()))
+        if not self.stop.is_set():
+            self.discovery_allowed = self.tracking_allowed = True
+            self.store.event(self.path, "quota_resume")
+            self.notify({"operation": "quota_resume", "status": "RUNNING"})
+
     def _record(self, bundle: CollectionBundle) -> None:
         self.summary["collections"] += 1
         self.summary["raw_observations"] += len(bundle.observations)
+        for field in (
+            "discovered_video_count",
+            "eligible_video_count",
+            "excluded_too_young_count",
+            "excluded_low_views_count",
+            "excluded_missing_views_count",
+        ):
+            self.summary[field] += getattr(bundle.metadata, field)
         self.summary["partial_collections"] += int(
             bundle.metadata.status in (Status.PARTIAL, Status.QUOTA_STOPPED)
         )
         self.summary["failures"] += int(bundle.metadata.status == Status.FAILED)
         self.summary["warnings"].extend(bundle.warnings)
+        if bundle.metadata.status == Status.COMPLETE:
+            self.summary["last_successful_collection"] = bundle.metadata.finished_at
         self.monitored.add(bundle.topic.topic_id)
         self.unique_videos.update(v.identity.video_id for v in bundle.observations)
         self.unique_creators.update(v.identity.channel_id for v in bundle.observations)

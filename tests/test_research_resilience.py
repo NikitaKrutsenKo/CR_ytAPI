@@ -170,7 +170,7 @@ def test_historical_flow_no_baselines_or_fake_counters(tmp_path):
         CandidateTopic.named("AI"),
         window_mode="STATIC",
         requested_from="2026-09-01T00:00:00Z",
-        requested_to="2026-09-18T00:00:00Z",
+        requested_to="2026-09-20T00:00:00Z",
     )
     config = ExperimentConfig(Mode.HISTORICAL, (request,))
     experiment = ExperimentManager(
@@ -263,7 +263,7 @@ def test_product_search_estimate_uses_largest_page_count(tmp_path):
     )
     config = ExperimentConfig(Mode.PRODUCT, requests, max_retries=0, search_budget=1000, other_budget=100000)
     estimate = QuotaManager(tmp_path / "quota.sqlite", "DEFAULT", 1000, 100000).estimate(config)
-    assert estimate.search_calls == 100
+    assert estimate.search_calls == 200
 
 
 def test_search_quota_stop_preserves_available_counter_tracking(tmp_path):

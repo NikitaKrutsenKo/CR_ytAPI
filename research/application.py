@@ -47,7 +47,7 @@ class ExperimentManager:
         secret = self.profiles.resolve(config.api_profile_name)
         quota = self.quota(config)
         estimate = quota.estimate(config)
-        if estimate.status == "WOULD EXCEED BUDGET":
+        if estimate.status == "WOULD EXCEED BUDGET" and not config.endless_mode:
             raise QuotaStopped("Experiment would exceed configured quota budget")
         MetricConfig(**config.gap_formula).validate()
         TrendConfig(**config.trend_formula)
@@ -59,8 +59,9 @@ class ExperimentManager:
             profile=config.api_profile_name,
             max_retries=config.max_retries,
             cancelled=stop.is_set,
+            sleeper=stop.wait,
         )
         run = ExperimentRun(config, self.store, experiment, client, quota, estimate, stop, notify)
-        client.cancelled = lambda: stop.is_set() or time.monotonic() >= run.deadline
+        client.cancelled = lambda: stop.is_set() or (not config.endless_mode and time.monotonic() >= run.deadline)
         run.execute()
         return experiment
