@@ -227,14 +227,30 @@ class ExperimentRun:
 
     def _wait_for_quota(self) -> None:
         resume = self.quota.next_reset()
+        elapsed = time.monotonic() - self.begin
+        current_windows = {
+            request.topic.topic_id: encode(
+                WindowResolver.resolve(
+                    request,
+                    now_utc(),
+                    self.config.minimum_video_age_hours,
+                    elapsed_seconds=elapsed,
+                    initial=self.initial_windows[request.topic.topic_id],
+                )
+            )
+            for request in self.config.requests
+        }
         self.summary["status"] = Status.WAITING_FOR_QUOTA
-        self.store.event(self.path, "quota_pause", expected_resume=iso(resume))
+        self.store.event(
+            self.path, "quota_pause", expected_resume=iso(resume), current_windows=current_windows
+        )
         self.notify(
             {
                 "operation": "quota_wait",
                 "status": Status.WAITING_FOR_QUOTA,
                 "expected_resume": iso(resume),
                 "last_successful_collection": self.summary.get("last_successful_collection"),
+                "current_windows": current_windows,
             }
         )
         while not self.stop.is_set() and self.quota.seconds_until_reset() > 0:

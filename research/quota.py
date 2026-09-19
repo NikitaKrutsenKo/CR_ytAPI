@@ -3,8 +3,8 @@ from __future__ import annotations
 import math
 import sqlite3
 from dataclasses import dataclass
-from pathlib import Path
 from datetime import datetime, time, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from research.domain import ExperimentConfig, Mode, now_utc

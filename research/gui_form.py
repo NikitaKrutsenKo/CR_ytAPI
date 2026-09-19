@@ -6,8 +6,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QDateTime, Qt, QTimeZone
 from PySide6.QtWidgets import (
-    QComboBox,
     QCheckBox,
+    QComboBox,
     QDateTimeEdit,
     QDoubleSpinBox,
     QFormLayout,
@@ -19,7 +19,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from research.domain import CandidateTopic, CollectionRequest, ExperimentConfig, Mode, WindowResolver, iso, now_utc
+from research.domain import (
+    CandidateTopic,
+    CollectionRequest,
+    ExperimentConfig,
+    Mode,
+    WindowResolver,
+    iso,
+    now_utc,
+)
 from research.storage import read_json, write_json
 
 
@@ -170,7 +178,9 @@ class ExperimentForm(QWidget):
                 requested_to=iso(datetime.fromtimestamp(self.end.dateTime().toSecsSinceEpoch(), UTC)),
             )
             result = WindowResolver.resolve(request, now_utc(), self.minimum_age.value())
-            fmt = lambda value: value.strftime("%Y-%m-%d %H:%M UTC")
+            def fmt(value):
+                return value.strftime("%Y-%m-%d %H:%M UTC")
+
             width = result.window_width_seconds / 3600
             projection = (
                 f"After +1 real hour: {fmt(result.effective_from + timedelta(hours=1))} → "

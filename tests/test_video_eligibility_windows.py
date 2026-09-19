@@ -12,7 +12,6 @@ from research.domain import (
     iso,
 )
 
-
 NOW = datetime(2026, 9, 19, 10, tzinfo=UTC)
 
 
