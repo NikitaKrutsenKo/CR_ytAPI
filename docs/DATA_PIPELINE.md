@@ -309,7 +309,7 @@ flowchart LR
 
 | Mechanism | Implementation | Benefit |
 |---|---|---|
-| **Compact JSON** | `write_json(..., compact=True)` | 40–50% smaller file size for raw bundles & cache |
+| **Human-Friendly JSON** | `write_json(..., indent=2)` | Clean 2-space indentation by default for easy inspection |
 | **Gzip Support** | Transparent `.json.gz` + magic byte `\x1f\x8b` detection | ~80% compression on disk for archival storage |
 | **JSONL Streaming** | `iter_jsonl()` generator | Prevents multi-hundred megabyte heap bloat |
 | **Temporary File Purging** | `cleanup_temporary_files()` + `try...finally` unlinking | Guarantees zero orphaned `.tmp` atomic write files |

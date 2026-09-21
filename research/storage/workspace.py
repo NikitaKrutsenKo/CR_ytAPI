@@ -61,7 +61,7 @@ class TopicWorkspaceManager:
     def save_bundle(self, experiment: Path, bundle: CollectionBundle) -> None:
         """Persist an immutable CollectionBundle to the topic's raw directory."""
         raw_path = self.topic(bundle.topic.topic_id) / "raw" / (bundle.metadata.batch_id + ".json")
-        write_json(raw_path, bundle, exclusive=True, compact=True)
+        write_json(raw_path, bundle, exclusive=True)
         append_jsonl(
             experiment / "inputs.jsonl",
             {"path": str(raw_path.relative_to(self.root)), "sha256": fingerprint(bundle)},

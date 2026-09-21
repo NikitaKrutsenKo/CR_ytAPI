@@ -134,6 +134,14 @@ def test_write_and_read_json_compact_and_gzip(tmp_path):
 
     payload = {"key": "value", "list": [1, 2, 3], "nested": {"sub": "data"}}
 
+    # Human-friendly default test (indented)
+    pretty_path = tmp_path / "pretty.json"
+    write_json(pretty_path, payload)
+    pretty_text = pretty_path.read_text(encoding="utf-8")
+    assert "\n" in pretty_text
+    assert "  \"key\": \"value\"" in pretty_text
+    assert read_json(pretty_path) == payload
+
     # Compact test
     compact_path = tmp_path / "compact.json"
     write_json(compact_path, payload, compact=True)

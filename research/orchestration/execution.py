@@ -306,7 +306,6 @@ class ExperimentRun:
                 self.path / "enrichment" / (bundle.metadata.batch_id + ".json"),
                 batch.to_dict(),
                 exclusive=True,
-                compact=True,
             )
             append_jsonl(
                 self.path / "enrichment_manifest.jsonl",

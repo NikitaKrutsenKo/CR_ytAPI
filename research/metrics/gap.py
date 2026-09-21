@@ -441,7 +441,7 @@ class GapEnricher:
                 "observations": records,
             }
         self._prune_cache()
-        write_json(self.cache_path, self.cache, compact=True)
+        write_json(self.cache_path, self.cache)
         self.cache = read_json(self.cache_path)
         videos = []
         for current in bundle.observations:

@@ -11,20 +11,27 @@ from uuid import uuid4
 from research.core.domain import encode
 
 
-def write_json(path: Path, value, exclusive: bool = False, compact: bool = False) -> None:
+def write_json(
+    path: Path,
+    value,
+    exclusive: bool = False,
+    indent: int | None = 2,
+    compact: bool = False,
+) -> None:
     """Write strict JSON atomically; immutable records use exclusive creation.
 
     Args:
         path: Target file path (supports .json or .json.gz).
         value: Serializable data structure.
         exclusive: If True, fails if the target file already exists ('x' mode).
-        compact: If True, uses compact separators without indentation to reduce disk footprint.
+        indent: Indentation level for human-friendly formatting (default 2).
+        compact: If True or if indent is None, uses compact single-line separators.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    if compact:
+    if compact or indent is None:
         text = json.dumps(encode(value), ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     else:
-        text = json.dumps(encode(value), ensure_ascii=False, indent=2, allow_nan=False)
+        text = json.dumps(encode(value), ensure_ascii=False, indent=indent, allow_nan=False)
 
     is_gz = path.suffix == ".gz"
     if exclusive:
