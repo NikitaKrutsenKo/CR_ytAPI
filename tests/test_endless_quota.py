@@ -1,11 +1,12 @@
 from datetime import timedelta
 from threading import Event
 
-from research.application import ExperimentManager
-from research.domain import CandidateTopic, CollectionRequest, ExperimentConfig, Mode, now_utc
-from research.profiles import ApiProfiles
-from research.quota import QuotaEstimate, QuotaStopped
-from research.storage import read_json, read_jsonl
+from research.api.profiles import ApiProfiles
+from research.api.quota import QuotaEstimate, QuotaStopped
+from research.core.domain import CandidateTopic, CollectionRequest, ExperimentConfig, Mode
+from research.core.time import now_utc
+from research.orchestration.application import ExperimentManager
+from research.storage.io import read_json, read_jsonl
 from tests.test_research_flows import RunClient
 
 
@@ -76,7 +77,7 @@ def test_endless_quota_pause_resumes_same_experiment_and_stop_works(tmp_path):
 
 
 def test_endless_estimate_is_per_hour_and_pacific_day(tmp_path):
-    from research.quota import QuotaManager
+    from research.api.quota import QuotaManager
 
     config = ExperimentConfig(
         Mode.TREND,
@@ -98,7 +99,7 @@ def test_endless_estimate_is_per_hour_and_pacific_day(tmp_path):
 def test_pacific_reset_uses_timezone_boundary_and_dst(tmp_path):
     from datetime import UTC, datetime
 
-    from research.quota import QuotaManager
+    from research.api.quota import QuotaManager
 
     before_spring_dst = datetime(2026, 3, 8, 7, 30, tzinfo=UTC)
     quota = QuotaManager(tmp_path / "quota.sqlite", "DEFAULT", clock=lambda: before_spring_dst)

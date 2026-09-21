@@ -5,9 +5,9 @@ from unittest.mock import patch
 
 import pytest
 
-from research.application import ExperimentManager
-from research.discovery import YouTubeDiscoveryCollector
-from research.domain import (
+from research.api.discovery import YouTubeDiscoveryCollector
+from research.api.profiles import ApiProfiles
+from research.core.domain import (
     CandidateTopic,
     CollectionRequest,
     ExperimentConfig,
@@ -16,17 +16,17 @@ from research.domain import (
     Status,
     VideoIdentity,
     VideoObservation,
-    iso,
-    now_utc,
 )
-from research.evaluation import EventEvaluator, HistoricalAnalyzer
-from research.gap import GapEnricher
-from research.profiles import ApiProfiles
-from research.replay import ReplayService
-from research.scheduling import TopicScheduler
-from research.storage import TopicWorkspaceManager, read_json, read_jsonl
-from research.tracking import TrackedVideoRegistry
-from research.trend import TrendEngine, percentile
+from research.core.time import iso, now_utc
+from research.metrics.evaluation import EventEvaluator, HistoricalAnalyzer
+from research.metrics.gap import GapEnricher
+from research.metrics.tracking import TrackedVideoRegistry
+from research.metrics.trend import TrendEngine, percentile
+from research.orchestration.application import ExperimentManager
+from research.orchestration.replay import ReplayService
+from research.orchestration.scheduling import TopicScheduler
+from research.storage.io import read_json, read_jsonl
+from research.storage.workspace import TopicWorkspaceManager
 from tests.test_research_ingestion import NOW, FakeClient
 
 

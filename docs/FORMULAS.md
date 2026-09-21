@@ -16,7 +16,7 @@ The notebook is not copied or modified. Its source panel uses YouTube, Reddit an
 
 ## Gap: original mathematics preserved
 
-`research.gap.GapEngine` inherits the existing `metrics.engine.MetricEngine` without changing its formulas. Configuration is `config/formulas/gap_v1.json`, copied in full into each experiment. The original engine uses engagement/performance normalization and creator authority; `Gap = demand_norm * (1 - supply_norm)`. Intermediate rates, low/high boundaries, ER/PR, demand, supply, authority and qualifying counts remain in the snapshot.
+`research.metrics.gap.GapEngine` implements the Gap mathematics using calculations from `research.metrics.calculators`. Configuration is `config/formulas/gap_v1.json`, copied in full into each experiment. The engine uses engagement/performance normalization and creator authority; `Gap = demand_norm * (1 - supply_norm)`. Intermediate rates, low/high boundaries, ER/PR, demand, supply, authority and qualifying counts remain in the snapshot.
 
 The research enrichment adapter excludes the whole thematic batch from creator baselines and refuses missing counters. Cache ages are measured at the cache observation time. This avoids dividing an old counter by an artificially newer age. A historical publication request does not supply historical Gap counters.
 

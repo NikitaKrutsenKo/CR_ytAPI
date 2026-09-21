@@ -11,9 +11,9 @@ import pytest
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QApplication
 
-from research.application import ExperimentManager
-from research.gui import ResearchConsole
-from research.profiles import ApiProfiles
+from research.api.profiles import ApiProfiles
+from research.gui.console import ResearchConsole
+from research.orchestration.application import ExperimentManager
 from tests.test_research_flows import RunClient
 
 

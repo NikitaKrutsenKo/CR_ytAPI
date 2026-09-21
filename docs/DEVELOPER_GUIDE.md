@@ -3,32 +3,32 @@
 ## Reading order
 
 1. README: installation, component tree and modes.
-2. `research/domain.py`: the request/bundle/observation/experiment contracts.
-3. `research/application.py`: preflight validation and run creation.
-4. `research/execution.py`: lifecycle and a single collection cycle.
-5. `research/collection.py` and `research/discovery.py`: ingestion.
-6. `research/processing.py`: network-free calculation dispatch.
-7. `research/gap.py`, original `metrics/engine.py`, `research/trend.py` and `research/tracking.py`.
-8. `research/storage.py` and `research/replay.py`: persistence and reconstruction.
-9. `research/gui*.py`: presentation only.
+2. `research/core/domain.py`: the request/bundle/observation/experiment contracts.
+3. `research/orchestration/application.py`: preflight validation and run creation.
+4. `research/orchestration/execution.py`: lifecycle and a single collection cycle.
+5. `research/orchestration/collection.py` and `research/api/discovery.py`: ingestion.
+6. `research/metrics/processing.py`: network-free calculation dispatch.
+7. `research/metrics/gap.py`, `research/metrics/calculators.py`, `research/metrics/trend.py` and `research/metrics/tracking.py`.
+8. `research/storage/workspace.py` and `research/orchestration/replay.py`: persistence and reconstruction.
+9. `research/gui/`: presentation only (`console.py`, `form.py`, `analytics.py`).
 
 ## Where to find behavior
 
 | Question | Code |
 |---|---|
-| Main entry point? | `python -m research` → `research/__main__.py:main` |
+| Main entry point? | `python main.py` or `python -m research` → `research.gui.console:main` |
 | What happens after Run? | `ResearchConsole.run_experiment` → `ResearchWorker` → `ExperimentManager.run` → `ExperimentRun.execute` |
-| Where are HTTP requests? | `youtube/client.py:YouTubeClient.get`; endpoint services never contain formulas |
-| Pagination? | `research/discovery.py:YouTubeDiscoveryCollector.collect` for search; `research/gap.py:GapEnricher.enrich` for bounded creator playlists |
+| Where are HTTP requests? | `research/api/client.py:YouTubeClient.get`; endpoint services never contain formulas |
+| Pagination? | `research/api/discovery.py:YouTubeDiscoveryCollector.collect` for search; `research/metrics/gap.py:GapEnricher.enrich` for bounded creator playlists |
 | Dedupe? | Discovery ID dictionary, bounded request ID dedupe in `YouTubeVideoService`; cross-time observations stay separate |
 | CollectionBundle creation? | `YouTubeDiscoveryCollector.collect` and `CollectionService.track` |
 | Time windows/watermark? | `WindowResolver.resolve`, `CollectionRequest.bounds`, `CollectionService.discover` |
 | Eligibility? | `YouTubeDiscoveryCollector.collect` after batched video details; raw identities and eligible observations remain separate |
 | Quota wait/resume? | `ExperimentRun._wait_for_quota`; Pacific boundary in `QuotaManager.next_reset` |
 | Legacy duration/window migration? | `ExperimentConfig.from_dict` |
-| Gap enrichment? | `GapEnricher.enrich`; original mathematical engine remains unchanged |
+| Gap enrichment? | `GapEnricher.enrich`; mathematical formulas documented in `calculators.py` |
 | Trend enrichment? | `TrendEnricher.ingest/window/covered`; counter input from `TrackedVideoRegistry.observe` |
-| Formulas? | `metrics/engine.py`, `metrics/calculators.py`, `research/trend.py`; provenance in FORMULAS.md |
+| Formulas? | `research/metrics/calculators.py`, `research/metrics/gap.py`, `research/metrics/trend.py`; provenance in FORMULAS.md |
 | Parameters? | `config/formulas/*.json`; complete defaults frozen by `configuration.resolve_formulas` |
 | Quota counting? | `QuotaManager.consume` called before each HTTP attempt |
 | Cost preflight? | `QuotaManager.estimate`; conservative cold-cache plan and retry allowance |

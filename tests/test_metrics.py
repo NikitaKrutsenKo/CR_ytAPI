@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-
-from metrics import MetricConfig, MetricEngine
-from metrics.calculators import log_min_max_normalize
-from models.batch import CollectionInfo, Topic, YouTubeBatch
-from models.raw_video import RawTopicVideo, RecentVideoStat
+from research.core.models import CollectionInfo, RawTopicVideo, RecentVideoStat, Topic, YouTubeBatch
+from research.metrics.calculators import MetricConfig, log_min_max_normalize
+from research.metrics.gap import GapEngine as MetricEngine
+from research.storage.state import MetricsState
 
 
 def make_batch(timestamp: str = "2026-09-14T09:00:00Z", views: int = 1200) -> YouTubeBatch:
@@ -70,9 +69,6 @@ def test_log_normalization_is_clipped() -> None:
 
 
 def test_snapshot_contains_full_dataset_metrics():
-    from metrics import MetricEngine
-    from state import MetricsState
-
     batch = make_batch("2026-09-14T10:00:00+00:00")
     snapshot, _ = MetricEngine().process(batch, MetricsState())
     assert snapshot.total_views > 0

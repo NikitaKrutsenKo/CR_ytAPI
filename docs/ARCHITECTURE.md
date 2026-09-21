@@ -4,7 +4,7 @@
 
 Presentation (`gui*`, `__main__`) creates domain requests and dispatches application services. `ExperimentManager` validates, resolves every formula default, estimates and allocates a run. `ExperimentRun` owns cancellation, schedules and execution journaling. `MetricProcessor` owns independent engines and knows no network client. Infrastructure supplies immutable filesystem records, SQLite accounting and YouTube HTTP.
 
-The original `metrics/engine.py` and `metrics/calculators.py` remain the Gap implementation. `research/gap.py` gives that engine an explicit name and contains the creator enrichment adapter. `research/trend.py` contains YouTube-only deterministic research components. Neither engine makes API calls.
+`research.metrics.gap` and `research.metrics.calculators` provide the Gap implementation. `research.metrics.gap` contains the `GapEngine` and the creator enrichment adapter `GapEnricher`. `research.metrics.trend` contains YouTube-only deterministic research components. Neither engine makes API calls.
 
 ```mermaid
 flowchart TB

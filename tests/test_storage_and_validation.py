@@ -1,12 +1,17 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
-from models.batch import CollectionInfo, Topic, YouTubeBatch
-from models.metrics import MetricSnapshot
-from models.raw_video import RawTopicVideo, RecentVideoStat
-from storage.raw_batch_store import RawBatchStore
-from storage.validator import ValidationError, validate_batch, validate_snapshot
+from research.core.models import (
+    CollectionInfo,
+    MetricSnapshot,
+    RawTopicVideo,
+    RecentVideoStat,
+    Topic,
+    YouTubeBatch,
+)
+from research.storage.raw_batch_store import RawBatchStore
+from research.storage.validator import ValidationError, validate_batch, validate_snapshot
 
 
 def make_batch() -> YouTubeBatch:
@@ -17,7 +22,7 @@ def make_batch() -> YouTubeBatch:
     video = RawTopicVideo(
         video_id="topic-video",
         channel_id="channel",
-        published_at=datetime.now(timezone.utc).isoformat(),
+        published_at=datetime.now(UTC).isoformat(),
         views=1000,
         likes=20,
         comments=3,
@@ -101,3 +106,97 @@ def test_snapshot_bounded_metrics_are_checked():
     )
     with pytest.raises(ValidationError):
         validate_snapshot(snapshot)
+
+
+def test_cleanup_temporary_files(tmp_path):
+    from research.storage.io import cleanup_temporary_files
+
+    real_file = tmp_path / "data" / "important.json"
+    real_file.parent.mkdir(parents=True)
+    real_file.write_text('{"status": "ok"}', encoding="utf-8")
+
+    tmp_file_1 = tmp_path / "data" / "important.json.abc12345.tmp"
+    tmp_file_1.write_text('{"status": "partial"}', encoding="utf-8")
+
+    tmp_file_2 = tmp_path / "experiments" / "exp_01" / "bundle.json.def67890.tmp"
+    tmp_file_2.parent.mkdir(parents=True)
+    tmp_file_2.write_text('{"status": "stale"}', encoding="utf-8")
+
+    removed = cleanup_temporary_files(tmp_path)
+    assert removed == 2
+    assert real_file.exists()
+    assert not tmp_file_1.exists()
+    assert not tmp_file_2.exists()
+
+
+def test_write_and_read_json_compact_and_gzip(tmp_path):
+    from research.storage.io import read_json, write_json
+
+    payload = {"key": "value", "list": [1, 2, 3], "nested": {"sub": "data"}}
+
+    # Compact test
+    compact_path = tmp_path / "compact.json"
+    write_json(compact_path, payload, compact=True)
+    raw_text = compact_path.read_text(encoding="utf-8")
+    assert "\n" not in raw_text
+    assert read_json(compact_path) == payload
+
+    # Gzip test with .gz suffix
+    gz_path = tmp_path / "data.json.gz"
+    write_json(gz_path, payload, compact=True)
+    assert read_json(gz_path) == payload
+
+    # Test magic byte auto-detection even when file lacks .gz extension
+    magic_gz_path = tmp_path / "compressed_without_extension.bin"
+    magic_gz_path.write_bytes(gz_path.read_bytes())
+    assert read_json(magic_gz_path) == payload
+
+
+def test_iter_jsonl_streaming(tmp_path):
+    from research.storage.io import append_jsonl, iter_jsonl, read_jsonl
+
+    path = tmp_path / "test.jsonl"
+    append_jsonl(path, {"id": 1, "name": "alpha"})
+    append_jsonl(path, {"id": 2, "name": "beta"})
+
+    streamed = list(iter_jsonl(path))
+    assert streamed == [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}]
+    assert read_jsonl(path) == streamed
+
+
+def test_youtube_client_close_and_context_manager():
+    from unittest.mock import MagicMock
+
+    from research.api.client import YouTubeClient
+
+    mock_session = MagicMock()
+    client = YouTubeClient("fake-key", session=mock_session)
+    client.close()
+    mock_session.close.assert_called_once()
+
+    mock_session_ctx = MagicMock()
+    with YouTubeClient("fake-key", session=mock_session_ctx) as ctx_client:
+        assert ctx_client is not None
+    mock_session_ctx.close.assert_called_once()
+
+
+def test_gap_enricher_prunes_cache(tmp_path):
+    from research.metrics.gap import GapEnricher
+    from research.storage.io import write_json
+
+    cache_file = tmp_path / "creator_cache.json"
+    dummy_cache = {
+        "ch_1": {"last_refresh": "2026-09-01T00:00:00Z"},
+        "ch_2": {"last_refresh": "2026-09-02T00:00:00Z"},
+        "ch_3": {"last_refresh": "2026-09-03T00:00:00Z"},
+        "ch_4": {"last_refresh": "2026-09-04T00:00:00Z"},
+    }
+    write_json(cache_file, dummy_cache)
+
+    enricher = GapEnricher(None, cache_file, None, max_entries=2)
+    assert len(enricher.cache) == 2
+    assert "ch_3" in enricher.cache
+    assert "ch_4" in enricher.cache
+    assert "ch_1" not in enricher.cache
+    assert "ch_2" not in enricher.cache
+

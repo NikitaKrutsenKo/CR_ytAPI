@@ -73,29 +73,29 @@ flowchart LR
 ## Actual component tree
 
 ```text
-ResearchConsole (research/gui.py)
-├── ExperimentForm (gui_form.py): topics, modes, windows, formulas, quota
-├── AnalyticsPanel (gui_analytics.py): series, overlays, event axis, exports
+ResearchConsole (research.gui.console)
+├── ExperimentForm (research.gui.form): topics, modes, windows, formulas, quota
+├── AnalyticsPanel (research.gui.analytics): series, overlays, event axis, exports
 ├── ResearchWorker: background application commands
-├── ExperimentManager (application.py): validate, resolve formulas, preflight
-│   ├── QuotaManager (quota.py): separate daily search/read pools
-│   ├── ExperimentRun (execution.py): finite lifecycle and cancellation
-│   │   ├── TopicScheduler (scheduling.py): explainable exploration/monitoring
-│   │   ├── CollectionService (collection.py): discovery and tracking
-│   │   │   └── YouTubeDiscoveryCollector (discovery.py)
-│   │   │       ├── YouTubeSearchService (youtube/search.py)
-│   │   │       ├── YouTubeVideoService (youtube/videos.py)
-│   │   │       └── YouTubeClient (youtube/client.py)
-│   │   ├── GapEnricher (gap.py): cached creator baselines
-│   │   ├── MetricProcessor (processing.py)
-│   │   │   ├── GapEngine → original metrics/engine.py
-│   │   │   ├── TrendEnricher + TrendEngine (trend.py)
-│   │   │   ├── TrackedVideoRegistry (tracking.py)
-│   │   │   └── HistoricalAnalyzer (evaluation.py)
-│   │   └── ProductReport (reporting.py)
-│   └── TopicWorkspaceManager (storage.py)
-└── ReplayService (replay.py) → same network-free MetricProcessor
-    EventEvaluator (evaluation.py) annotates results separately
+├── ExperimentManager (research.orchestration.application): validate, resolve formulas, preflight
+│   ├── QuotaManager (research.api.quota): separate daily search/read pools
+│   ├── ExperimentRun (research.orchestration.execution): finite lifecycle and cancellation
+│   │   ├── TopicScheduler (research.orchestration.scheduling): explainable exploration/monitoring
+│   │   ├── CollectionService (research.orchestration.collection): discovery and tracking
+│   │   │   └── YouTubeDiscoveryCollector (research.api.discovery)
+│   │   │       ├── YouTubeSearchService (research.api.services)
+│   │   │       ├── YouTubeVideoService (research.api.services)
+│   │   │       └── YouTubeClient (research.api.client)
+│   │   ├── GapEnricher (research.metrics.gap): cached creator baselines
+│   │   ├── MetricProcessor (research.metrics.processing)
+│   │   │   ├── GapEngine (research.metrics.gap / calculators.py)
+│   │   │   ├── TrendEnricher + TrendEngine (research.metrics.trend)
+│   │   │   ├── TrackedVideoRegistry (research.metrics.tracking)
+│   │   │   └── HistoricalAnalyzer (research.metrics.evaluation)
+│   │   └── ProductReport (research.orchestration.reporting)
+│   └── TopicWorkspaceManager (research.storage.workspace)
+└── ReplayService (research.orchestration.replay) → same network-free MetricProcessor
+    EventEvaluator (research.metrics.evaluation) annotates results separately
 ```
 
 ## Modes and exact workflows
@@ -144,7 +144,7 @@ Historical search is a sample, not a complete census. Blank publication buckets 
 - Video/channel detail reads are batched to 50. Creator playlist reads are bounded. Gap caches uploads IDs, selected baseline IDs, raw counters and refresh timestamps for a configurable TTL. Quick Trend and historical publication mode never fetch creator baselines.
 - Retries: only transient HTTP 429/500/502/503/504 or temporary transport failures; exponential delay with jitter, finite attempts. HTTP errors omit URL, body and key.
 
-The 1.45% empirical cost from the original PoC is not hardcoded. All quota displays say **Local estimate**. The legacy CLI remains available for old scripts but its original collector does not participate in the desktop quota ledger.
+The 1.45% empirical cost from the original PoC is not hardcoded. All quota displays say **Local estimate**.
 
 ## Storage and reproducibility
 
@@ -174,7 +174,7 @@ experiments/<experiment_id>/
 └── results/<topic_id>/{gap,trend,tracking,historical}.{jsonl,csv}
 ```
 
-Metrics and state are scoped to **experiment + topic**, avoiding contamination between formula configurations. The topic directory holds shared raw observations. Raw schema 1 from the original PoC remains readable with the original `python replay.py`; it is not silently converted to schema 2. Original CLI entry points `main.py`, `scheduler.py`, `replay.py`, `build_dataset.py` are retained.
+Metrics and state are scoped to **experiment + topic**, avoiding contamination between formula configurations. The topic directory holds shared raw observations. Entry points `main.py` and `python -m research` both launch the Research Console GUI directly.
 
 JSON and CSV exports are local. Derived metrics may be recalculated; raw files are exclusive-create and checksum verified. Do not edit raw files to repair a run. Preserve the dataset and logs, fix the reader/migration, then replay into a new result workspace. Endless runs pause in-process on daily quota exhaustion and resume the same experiment after the timezone-aware Pacific reset; process restart recovery remains outside this scope.
 
@@ -202,7 +202,7 @@ With **Run until manually stopped**, Duration is ignored. Cost preview reports r
 cd "F:\!Life\Business\CreatorRadar\CR_API"
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 .\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m ruff check research youtube/client.py youtube/search.py youtube/videos.py tests/test_research*.py
+.\.venv\Scripts\python.exe -m ruff check research main.py tests
 ```
 
 Tests use fake responses and offscreen Qt, never live API quota. The suite covers original Gap regression, modes, shared discovery, retries, quotas, pagination, cache, raw integrity, tracking, historical separation, event alignment, replay and GUI worker/analytics integration.
@@ -227,4 +227,3 @@ See [architecture](docs/ARCHITECTURE.md), [developer guide](docs/DEVELOPER_GUIDE
 | Replay dataset missing | Restore the experiment and its referenced `data/topics` files together; never fetch substitutes during replay. |
 | Corrupt state or raw files | Preserve files; inspect logs/checksums. New replay derives fresh state from intact raw inputs. |
 | Stop is not immediate | The current HTTP call has a 30-second timeout; cancellation is checked before every following request. |
-| Old CLI quota differs | Legacy collection is outside the desktop ledger; use GUI for guarded research runs. |

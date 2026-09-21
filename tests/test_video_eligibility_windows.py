@@ -2,15 +2,15 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from research.discovery import YouTubeDiscoveryCollector
-from research.domain import (
+from research.api.discovery import YouTubeDiscoveryCollector
+from research.core.domain import (
     CandidateTopic,
     CollectionRequest,
     ExperimentConfig,
     Mode,
     WindowResolver,
-    iso,
 )
+from research.core.time import iso
 
 NOW = datetime(2026, 9, 19, 10, tzinfo=UTC)
 

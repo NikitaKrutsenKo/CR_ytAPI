@@ -4,25 +4,25 @@ from datetime import timedelta
 
 import pytest
 
-from research.application import ExperimentManager
-from research.collection import CollectionService
-from research.discovery import YouTubeDiscoveryCollector, observation
-from research.domain import (
+from research.api.client import RequestCancelled, YouTubeApiError, YouTubeClient, YouTubeQuotaExceeded
+from research.api.discovery import YouTubeDiscoveryCollector, observation
+from research.api.profiles import ApiProfiles
+from research.api.quota import QuotaManager, QuotaStopped
+from research.core.domain import (
     CandidateTopic,
     CollectionRequest,
     ExperimentConfig,
     Mode,
     Status,
-    iso,
 )
-from research.profiles import ApiProfiles
-from research.quota import QuotaManager, QuotaStopped
-from research.replay import ReplayService
-from research.storage import read_json, read_jsonl
-from research.trend import TrendEngine
+from research.core.time import iso
+from research.metrics.trend import TrendEngine
+from research.orchestration.application import ExperimentManager
+from research.orchestration.collection import CollectionService
+from research.orchestration.replay import ReplayService
+from research.storage.io import read_json, read_jsonl
 from tests.test_research_flows import RunClient, make_trend_bundle
 from tests.test_research_ingestion import NOW, FakeClient, video
-from youtube.client import RequestCancelled, YouTubeApiError, YouTubeClient, YouTubeQuotaExceeded
 
 
 @pytest.mark.parametrize(
@@ -166,11 +166,13 @@ def test_historical_flow_no_baselines_or_fake_counters(tmp_path):
         clients.append(client)
         return client
 
+    from research.core.time import now_utc
+    now = now_utc()
     request = CollectionRequest(
         CandidateTopic.named("AI"),
         window_mode="STATIC",
-        requested_from="2026-09-01T00:00:00Z",
-        requested_to="2026-09-20T00:00:00Z",
+        requested_from=iso(now - timedelta(days=20)),
+        requested_to=iso(now),
     )
     config = ExperimentConfig(Mode.HISTORICAL, (request,))
     experiment = ExperimentManager(
@@ -205,7 +207,7 @@ def test_replay_rejects_missing_baseline(tmp_path):
 
 
 def test_formula_defaults_frozen_and_config_tamper_rejected(tmp_path):
-    from research.storage import write_json
+    from research.storage.io import write_json
 
     config = ExperimentConfig(
         Mode.TREND, (CollectionRequest(CandidateTopic.named("AI")),), duration_hours=0.001 / 60
@@ -243,7 +245,7 @@ def test_gap_failure_never_removes_trend_data(tmp_path):
 
 
 def test_engagement_same_age_cohorts_and_delta_eligibility():
-    from research.tracking import CounterDelta
+    from research.metrics.tracking import CounterDelta
 
     engine = TrendEngine()
 
@@ -348,6 +350,6 @@ def test_deadline_checked_between_http_requests(tmp_path, monkeypatch):
         tmp_path, ApiProfiles(tmp_path / "absent", {"YOUTUBE_API_KEY_DEFAULT": "fake"}), factory
     ).run(config)
     assert len(calls) == 1
-    from research.storage import TopicWorkspaceManager
+    from research.storage.workspace import TopicWorkspaceManager
 
     assert next(TopicWorkspaceManager(tmp_path).bundles(experiment)).metadata.status == Status.CANCELLED

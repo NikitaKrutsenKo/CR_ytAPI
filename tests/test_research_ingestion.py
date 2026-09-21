@@ -3,12 +3,12 @@ from datetime import UTC, datetime
 
 import pytest
 
-from research.discovery import YouTubeDiscoveryCollector
-from research.domain import CandidateTopic, CollectionRequest, ExperimentConfig, Mode, Status
-from research.profiles import ApiProfiles
-from research.quota import QuotaManager, QuotaStopped
-from youtube.client import YouTubeClient
-from youtube.videos import YouTubeVideoService
+from research.api.client import YouTubeClient
+from research.api.discovery import YouTubeDiscoveryCollector
+from research.api.profiles import ApiProfiles
+from research.api.quota import QuotaManager, QuotaStopped
+from research.api.services import YouTubeVideoService
+from research.core.domain import CandidateTopic, CollectionRequest, ExperimentConfig, Mode, Status
 
 NOW = datetime(2026, 9, 17, 12, tzinfo=UTC)
 
