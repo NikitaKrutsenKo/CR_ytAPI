@@ -1,106 +1,134 @@
-# Architecture
+# System Architecture
 
-## Layers and dependency direction
+CreatorRadar Research is a modular desktop research laboratory designed for deterministic YouTube trend analysis and content gap detection. The codebase enforces strict separation of concerns across presentation, orchestration, domain logic, mathematical calculation, and infrastructure.
 
-Presentation (`gui*`, `__main__`) creates domain requests and dispatches application services. `ExperimentManager` validates, resolves every formula default, estimates and allocates a run. `ExperimentRun` owns cancellation, schedules and execution journaling. `MetricProcessor` owns independent engines and knows no network client. Infrastructure supplies immutable filesystem records, SQLite accounting and YouTube HTTP.
+For a step-by-step description of data collection, enrichment, and storage, see [DATA_PIPELINE.md](file:///d:/Programming/Projects/GitHub/CR_ytAPI/docs/DATA_PIPELINE.md).
 
-`research.metrics.gap` and `research.metrics.calculators` provide the Gap implementation. `research.metrics.gap` contains the `GapEngine` and the creator enrichment adapter `GapEnricher`. `research.metrics.trend` contains YouTube-only deterministic research components. Neither engine makes API calls.
+---
 
-```mermaid
-flowchart TB
-  subgraph Presentation
-    FORM[ExperimentForm] --> WORK[ResearchWorker]
-    ANA[AnalyticsPanel]
-  end
-  subgraph Application
-    MAN[ExperimentManager] --> RUN[ExperimentRun]
-    RUN --> COL[CollectionService]
-    RUN --> PROC[MetricProcessor]
-    REPLAY[ReplayService] --> PROC
-  end
-  subgraph Domain
-    CONTRACT[Typed requests / bundles / observations]
-    GAP[GapEngine]
-    TREND[TrendEngine]
-    REG[TrackedVideoRegistry]
-    SCHED[TopicScheduler]
-  end
-  subgraph Infrastructure
-    HTTP[YouTubeClient]
-    RAW[TopicWorkspaceManager]
-    QUOTA[QuotaManager SQLite]
-  end
-  WORK --> MAN
-  COL --> HTTP
-  COL --> CONTRACT
-  HTTP --> QUOTA
-  RUN --> RAW
-  RUN --> SCHED
-  PROC --> GAP
-  PROC --> TREND
-  PROC --> REG
-  PROC --> RAW
-  RAW --> ANA
+## 1. Architectural Layers & Responsibilities
+
+The codebase is partitioned into six cohesive subpackages under `research/`:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Presentation Layer                     │
+│                 research.gui (PySide6 / GUI)                │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ Dispatches background tasks
+┌──────────────────────────────▼──────────────────────────────┐
+│                     Orchestration Layer                     │
+│                   research.orchestration                    │
+│    (ExperimentManager, ExperimentRun, CollectionService)    │
+└──────────────┬──────────────────────────────┬───────────────┘
+               │                              │
+┌──────────────▼──────────────┐┌──────────────▼───────────────┐
+│     Mathematical Engines    ││     Infrastructure / I/O     │
+│       research.metrics      ││   research.api & research.   │
+│ (GapEngine, TrendEngine,    ││            storage           │
+│       Calculators)          ││ (YouTubeClient, QuotaManager,│
+│    * Strictly Network-Free* ││    TopicWorkspaceManager)    │
+└──────────────▲──────────────┘└──────────────▲───────────────┘
+               │                              │
+               └──────────────┬───────────────┘
+                              │ Uses typed contracts
+┌─────────────────────────────┴───────────────────────────────┐
+│                         Core Domain                         │
+│                        research.core                        │
+│          (Domain Models, Time Utilities, Enums)             │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-## Domain contracts
+### Layer Summary
 
-`CandidateTopic` has a stable slug plus hash (collision-resistant even for punctuation variants), aliases, category, source, creation time, priority and monitoring state. Canonicalization is deterministic whitespace/case handling. No LLM is required. Aliases are metadata, not hidden extra searches.
+| Package | Purpose | Key Classes / Modules |
+|---|---|---|
+| **`research.core`** | Immutable domain entities, data models, contracts, and UTC time utilities. | `CollectionBundle`, `VideoObservation`, `ExperimentConfig`, `CandidateTopic`, `now_utc`, `iso`. |
+| **`research.api`** | External YouTube Data API v3 boundary, guarded HTTP sessions, retry logic, and SQLite quota tracking. | `YouTubeClient`, `QuotaManager`, `YouTubeDiscoveryCollector`, `ApiProfiles`. |
+| **`research.metrics`** | Network-free mathematical algorithms for Gap and Trend detection, creator baselines, tracking registries, and event analysis. | `GapEngine`, `GapEnricher`, `TrendEngine`, `TrendEnricher`, `MetricProcessor`, `calculators.py`. |
+| **`research.orchestration`** | Runtime lifecycle coordination, job scheduling, replay execution, and reporting. | `ExperimentManager`, `ExperimentRun`, `CollectionService`, `TopicScheduler`, `ReplayService`. |
+| **`research.storage`** | Local filesystem storage, atomic JSON/JSONL I/O, compression, state persistence, CSV writer, and validation. | `TopicWorkspaceManager`, `RawBatchStore`, `io.py`, `cleanup_temporary_files`. |
+| **`research.gui`** | Desktop graphical interface built with PySide6 and pyqtgraph. | `ResearchConsole`, `ExperimentForm`, `AnalyticsPanel`, `ResearchWorker`. |
 
-`CollectionRequest` validates explicit UTC static bounds or positive rolling hours, page size/cap and overlap. `VideoIdentity` separates publication identity from `VideoObservation`, whose timestamp is the actual counter-read time. Optional counters remain None. `CollectionBundle` contains all raw discovery identities, successful statistics, collection metadata, endpoint telemetry and warnings. Creator eligibility never modifies it.
+---
 
-`ExperimentConfig` is saved as a full immutable snapshot, with resolved Gap/Trend parameter defaults and a canonical SHA256. Formula variants remain independent from raw data. `KnownEvent` is a separate evaluation contract with traceable source metadata. Its type is not an argument of `TrendEngine` or `GapEngine`.
+## 2. Ingestion & API Boundary Invariants
 
-## Ingestion boundaries
+1. **Guarded HTTP Client (`YouTubeClient`)**:
+   - `YouTubeClient.get` is the sole HTTP boundary with YouTube Data API v3.
+   - Quota usage is debited atomically before request dispatch.
+   - Retries use exponential backoff with jitter and are each accounted against quota.
+   - Errors are sanitized: request URLs, API keys, and parameter values never leak into logs or telemetry.
+   - Connection pools are managed with `YouTubeClient.close()` and context manager support (`with YouTubeClient(...)`).
+2. **Quota Management (`QuotaManager`)**:
+   - Backed by an atomic SQLite ledger (`data/quota.sqlite`).
+   - Resets on the Pacific Time midnight boundary (`America/Los_Angeles`) accounting for Daylight Saving Time.
+   - Independent budgets for `search` (high-cost) and other read endpoints (`videos`, `channels`, `playlistItems`).
+   - SQLite connections are managed using `contextlib.closing` to avoid Windows file locks.
+3. **Discovery vs. Tracking Distinction**:
+   - **Discovery** (`search.list` + `videos.list`): Finds newly published topic videos within a rolling or static window. High quota cost (100 units per search page).
+   - **Tracking** (`videos.list` only): Updates view, like, and comment counters for a curated shortlist of active videos. Low quota cost (1 unit per 50 videos).
 
-`YouTubeClient.get` is the only HTTP boundary. It accounts each attempted operation before transmission and writes sanitized telemetry afterward. Each retry is a separate quota debit. Search has a call budget; all currently supported other read endpoints cost one unit each. Unknown endpoints are rejected by the guard until their costs are defined. The API's own quota response stops the relevant workflow; there is no rotation.
+---
 
-`YouTubeDiscoveryCollector.collect` resolves bounds, follows page tokens, deduplicates IDs and reads details in bounded groups. Cancellation, quota blocks and API failures retain successful discovery identities and statistics already received. A failed later search page can leave earlier identities without statistics; this is persisted explicitly, not manufactured into a complete dataset.
+## 3. Mathematical Separation: Gap vs. Trend
 
-`CollectionService` maintains per-run per-topic watermarks. Only complete uncapped discovery advances the watermark. A separate `track` operation receives registered IDs and only calls `videos.list`. Raw observation history is never deduplicated globally.
+The two analytics engines run independently and have zero network awareness:
 
-## Gap branch
+```mermaid
+flowchart LR
+    BUNDLE[CollectionBundle] --> GAP_ENRICH[GapEnricher]
+    GAP_ENRICH -->|YouTubeBatch with Creator Baselines| GAP[GapEngine]
+    
+    BUNDLE -->|Observations & Watermarks| TREND_ENRICH[TrendEnricher]
+    BUNDLE -->|Shortlist Observation Deltas| TRACK[TrackedVideoRegistry]
+    TREND_ENRICH --> TREND[TrendEngine]
+    TRACK --> TREND
+    
+    GAP --> OUT[Experiment Workspace / Results]
+    TREND --> OUT
+```
 
-`GapEnricher` batches channel lookups, bounds creator playlist reads, excludes all current thematic discovery IDs and batches baseline statistics. Its TTL cache is keyed by channel and contains uploads playlist ID, recent IDs, refresh timestamp and raw observations. Fresh entries do not make new calls. A cache may have too few usable videos after current-batch exclusion; the creator is ineligible until refresh, rather than silently lowering the minimum. Cached age is calculated at the cached observation timestamp. Changes to TTL/baseline policy are captured in experiment configuration.
+- **Gap Engine**: Evaluates whether a topic represents an authentic opportunity. Requires creator baseline enrichment to compare video performance against the creator's historical median.
+- **Trend Engine**: Evaluates whether a topic is surging in audience interest. Ingests raw observation time-series and counter deltas to compute EWMA view rates, velocity, acceleration, growth ($G$), burst ($Z$), breadth ($B$), and engagement ($E$).
+- **Failure Decoupling**: If creator baseline enrichment fails (e.g., due to quota limits or new channels), Trend calculations proceed unhindered.
 
-The selected legacy `YouTubeBatch` is stored exclusively in the experiment's enrichment directory and checksummed. Gap's original formulas and `MetricsState` are unchanged. Its output now also carries original discovery batch size and collection status for interpretation. Missing optional counters are not silently filled for the research Gap branch.
+---
 
-## Trend branch
+## 4. Persistence & File Organization
 
-See FORMULAS.md for exact mappings and deliberate research adaptations. `TrendEnricher` accumulates unique publication identities and successful collection-coverage intervals. `TrendEngine` evaluates completed, non-overlapping event-time buckets. Repeated network polling does not count as new independent windows. Previously unseen overlapping IDs enter the same identity index.
+Outputs are stored under isolated workspace directories:
 
-A partial/capped request or uncovered bucket yields null activity and a diagnostic row, not zero. It does not enter the causal baseline and resets derivative continuity. G uses only prior positive slopes; Z uses prior log-EWMA median/MAD; breadth uses prior creator counts. Counter reaction ECDFs are separate coarse same-age cohorts. Tracking velocities do not get an extra weight in the core score.
+- **Raw Data** (`data/topics/<topic_id>/raw/<batch_id>.json`):
+  Immutable, complete observation payloads stored immediately upon collection.
+- **Enrichment Data** (`experiments/<id>/enrichment/<batch_id>.json`):
+  Creator baseline data packaged for Gap Engine input, fingerprinted in `enrichment_manifest.jsonl`.
+- **Results** (`experiments/<id>/results/<topic_id>/`):
+  Append-only `.jsonl` metric snapshots with companion `.csv` files preserved for compatibility with external projects.
+- **State Checkpoints** (`experiments/<id>/state/<topic_id>/`):
+  Serialized snapshots of engine states (`gap.json`, `trend.json`, `tracking.json`) allowing incremental continuation.
+- **Atomic Operations**:
+  All mutable file writes use temporary files replaced atomically. Orphaned `.tmp` files are purged automatically on workspace initialization via `cleanup_temporary_files()`.
 
-Each topic has its own TrendState, registry and Gap state. `timestamp` in a live Trend row is the collection completion/decision time; `window_end` is the historical measurement bucket boundary. This prevents the event evaluator from treating an observation fetched later as an earlier real-time detection.
+---
 
-## Experiment lifecycle
+## 5. Offline Replay Pipeline
 
-`ExperimentManager.run` checks config/formulas/profile and the conservative plan before allocating or calling HTTP. `ExperimentRun` owns mutable state. Its methods separately choose due jobs, execute one cycle, capture Gap enrichment, record counts and finalize summaries. Stop/deadline checks bound the run; in-flight requests have a finite timeout. A final summary and quota report are written on normal completion, cancellation and processing failure.
+The `ReplayService` allows researchers to:
+1. Re-run experiments from existing stored raw batches without an API key or network access.
+2. Verify input integrity via SHA-256 manifest checks.
+3. Compare different formula parameters (e.g. `trend_sensitive.json` vs. `trend_conservative.json`) on identical historical data.
 
-The scheduler uses an explicit deterministic formula:
+---
 
-`priority_score = (base_priority + recent_signal + uncertainty + 0.1 * waiting) / max(estimated_search_pages, 1)`
+## 6. Extending the System
 
-`uncertainty = 1/(1+selection_count)` and `waiting = rounds_since_selection/topic_count`. Exploration slots occur when `floor(round*fraction)` increments and prefer least selected topics. Other slots maximize the score. Stable topic ID breaks ties. Feedback is the gated YouTube research score / 100, never a Known Event. The journal records reason, inputs and selected topic. Fixed heuristic weights are documented policy, not learned evidence.
-
-Current tracking selection is a bounded deterministic recency/view-count shortlist per topic, including a research warm-up sample. It is not the notebook's production catalyst/activation policy: the production panel is unavailable. It is intentionally bounded by `tracked_limit` and the read quota.
-
-## Persistence, concurrency and recovery
-
-Raw files are immutable exclusive-create JSON records under each topic. Experiment manifests reference them by workspace-relative path and hash. Readers reject path traversal, corrupt JSON, unknown schemas and hash mismatches. Gap enrichment has a separate manifest and integrity checks. JSON state/summary updates use same-directory temporary files and atomic replacement. Metrics are append-only JSONL with CSV companions.
-
-State/metrics live under experiment+topic, not a single global file. Replaying configurations never contaminates another run. Topic metadata/config history is separate from measurement data. SQLite `BEGIN IMMEDIATE` protects daily quota accounting across instances. Raw IDs and experiment IDs are UUID-based. Creator cache refresh is atomic but last-writer-wins across concurrent runs; losing a cache update can cause extra reads, not changed recorded raw inputs. Single-run journals and metric files have one writer.
-
-There is no automatic live-process resume. Immutable completed observations can be replayed into fresh states. Partial filesystem failures are explicit errors; preserve evidence and repair through an explicit reader/schema migration. Schema 1 remains handled by the old CLI replay; schema 2 is never silently interpreted as schema 1.
-
-## Replay and historical separation
-
-`ReplayService` verifies raw/config/enrichment hashes, resolves overridden parameter sets, constructs fresh `MetricProcessor` state and writes a new experiment. It does not construct a YouTubeClient or QuotaManager and never repairs missing data over the network. Raw files stay byte-for-byte unchanged. Memory use is linear in raw experiment size during initial verification; very large archives may require a future streaming replay index.
-
-`HistoricalAnalyzer` only bins publication identities in the selected static window; current counter values never enter these historical features. `EventEvaluator` works afterward on already calculated rows. A Known Event overlay changes neither raw data nor scores. It computes first rising/breakout/peak offsets and active-signal span; span includes gaps and is explicitly not a reconstructed continuous duration. No externally verified event catalog is bundled.
-
-## GUI and extension points
-
-Qt widgets contain no metric formulas. Worker signals carry progress/results; the main thread handles widgets. Closing during a run requests a safe stop and asks the user to close again after the request ends. Analytics reads persisted rows; null values create graph gaps. Two metric overlays are available; users should choose comparable scales. CSV/JSON exports are local.
-
-To add another platform, create a real ingestion adapter producing honest normalized signals with coverage and event/observation timestamps. Version the source panel and normalization contract, then extend the processor. Do not fill absent platform slots with zero or silently renormalize production weights. To add a fixed discovery panel, record an actual eligible denominator before claiming incidence.
+- **Adding a New Metric**:
+  1. Add typed configuration parameters in `research.core.domain`.
+  2. Implement deterministic formula logic in `research.metrics.calculators` or `research.metrics.trend`.
+  3. Update `research.metrics.processing.MetricProcessor` to record the new fields.
+  4. Document formula equations in [FORMULAS.md](file:///d:/Programming/Projects/GitHub/CR_ytAPI/docs/FORMULAS.md).
+- **Adding a New Platform/Source**:
+  1. Create a platform-specific ingestion collector adhering to the `CollectionBundle` domain contract.
+  2. Provide explicit publication and observation timestamps.
+  3. Never fabricate or renormalize missing platform metrics as zeros.

@@ -2,38 +2,31 @@
 
 A local Windows desktop laboratory for Gap and YouTube Trend research. Raw observations are saved first; deterministic calculations, experiment configuration and evaluation annotations are kept separately. This is research software, not the CreatorRadar SaaS or a validated forecasting system.
 
-## Windows setup and launch
+## Documentation Index
 
-Use Python 3.12 and the existing checkout:
+- **[DATA_PIPELINE.md](docs/DATA_PIPELINE.md)**: Comprehensive guide on data collection, counter tracking, creator baseline enrichment, mathematical processing, and storage.
+- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**: Architectural layers, dependency rules, invariants, and package structure.
+- **[DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md)**: Setup, testing, debugging, and codebase extension guide.
+- **[FORMULAS.md](docs/FORMULAS.md)**: Mathematical formulas, equations, and research adaptations for Gap and Trend engines.
+
+## Windows Setup and Launch
 
 ```powershell
-cd "F:\!Life\Business\CreatorRadar\CR_API"
-py -3.12 -m venv .venv
+# Create virtual environment
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+
+# Install dependencies
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
+
+# Configure API key in .env
 if (!(Test-Path .env)) { Copy-Item .env.example .env }
 notepad .env
-python -m research
+
+# Launch GUI Console
+python main.py
 ```
-
-If PowerShell blocks activation, activation is optional:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m research
-```
-
-Configure `.env` locally:
-
-```dotenv
-YOUTUBE_API_KEY_DEFAULT=
-YOUTUBE_API_KEY_NICK=
-CREATORRADAR_DEFAULT_API_PROFILE=DEFAULT
-```
-
-Fill at least one key using your own enabled YouTube Data API project. Empty profiles are not offered. The GUI displays **profile names only**; one experiment keeps one profile. Environment variables override `.env`. The old `YOUTUBE_API_KEY` variable remains a DEFAULT fallback. There is no automatic key rotation. Restart after editing `.env`.
-
-`python -m research --debug` enables detailed application logging. Requests/urllib3 DEBUG logging stays disabled to prevent URL/key disclosure. Never add secrets to experiment JSON, templates, code or screenshots.
 
 ## What happens after Run
 
