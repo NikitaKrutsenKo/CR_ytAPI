@@ -126,7 +126,9 @@ class QuotaManager:
             with conn:
                 conn.execute("BEGIN IMMEDIATE")
                 rows = dict(
-                    conn.execute("SELECT endpoint,calls FROM usage WHERE profile=? AND day=?", (self.profile, day))
+                    conn.execute(
+                        "SELECT endpoint,calls FROM usage WHERE profile=? AND day=?", (self.profile, day)
+                    )
                 )
                 used = (
                     rows.get("search", 0)
@@ -146,9 +148,7 @@ class QuotaManager:
         config.validate()
         duration_minutes = config.duration_hours * 60
         cycles = (
-            1
-            if config.mode == Mode.HISTORICAL
-            else math.ceil(duration_minutes / config.discovery_minutes)
+            1 if config.mode == Mode.HISTORICAL else math.ceil(duration_minutes / config.discovery_minutes)
         )
         if config.endless_mode:
             cycles = max(1, math.ceil(60 / config.discovery_minutes))

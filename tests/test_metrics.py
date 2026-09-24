@@ -52,9 +52,7 @@ def test_first_batch_initializes_state() -> None:
 def test_second_batch_uses_previous_state() -> None:
     engine = MetricEngine(MetricConfig())
     first_snapshot, state = engine.process(make_batch())
-    second_snapshot, second_state = engine.process(
-        make_batch("2026-09-14T10:00:00Z", views=2400), state
-    )
+    second_snapshot, second_state = engine.process(make_batch("2026-09-14T10:00:00Z", views=2400), state)
 
     assert second_snapshot.timestamp != first_snapshot.timestamp
     assert second_state.last_update_time == second_snapshot.timestamp

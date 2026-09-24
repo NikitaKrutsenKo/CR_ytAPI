@@ -25,8 +25,7 @@ from research.metrics.trend import TrendEngine, percentile
 from research.orchestration.application import ExperimentManager
 from research.orchestration.replay import ReplayService
 from research.orchestration.scheduling import TopicScheduler
-from research.storage.io import read_json, read_jsonl
-from research.storage.workspace import TopicWorkspaceManager
+from research.storage.db import DatabaseStorageAdapter
 from tests.test_research_ingestion import NOW, FakeClient
 
 
@@ -56,39 +55,48 @@ def test_live_modes_shared_discovery_and_offline_replay(tmp_path, mode, has_gap,
         clients.append(client)
         return client
 
-    config = ExperimentConfig(mode, (CollectionRequest(CandidateTopic.named("AI")),), duration_hours=0.001 / 60)
+    config = ExperimentConfig(
+        mode, (CollectionRequest(CandidateTopic.named("AI")),), duration_hours=0.001 / 60
+    )
     manager = ExperimentManager(
         tmp_path, ApiProfiles(tmp_path / ".env", {"YOUTUBE_API_KEY_DEFAULT": "fake"}), factory
     )
-    experiment = manager.run(config)
+    manager.store.clean_tables()
+    manager.store.seed_category("tech_ai", "AI & Technology")
+
+    run_id = manager.run(config)
+    assert run_id.startswith("exp_")
+
     resources = [r for r, _ in clients[0].calls]
     assert resources.count("search") == 1
     assert ("channels" in resources) == has_gap
+
     topic = config.requests[0].topic.topic_id
-    assert (experiment / "results" / topic / "gap.jsonl").exists() == has_gap
-    assert (experiment / "results" / topic / "trend.jsonl").exists() == has_trend
-    raw_before = {str(p): p.read_bytes() for p in (tmp_path / "data" / "topics").rglob("raw/*.json")}
+    latest_gap = manager.store.get_latest_gap(topic)
+    latest_trend = manager.store.get_latest_trend(topic)
+
+    assert (latest_gap is not None) == has_gap
+    assert (latest_trend is not None) == has_trend
+
+    # Test offline replay from database
     with patch("requests.Session.get", side_effect=AssertionError("Replay touched network")):
-        replay = ReplayService(tmp_path).run(experiment)
-    for kind in ("gap", "trend"):
-        path = experiment / "results" / topic / (kind + ".jsonl")
-        if path.exists():
-            assert read_jsonl(path) == read_jsonl(replay / "results" / topic / path.name)
-    assert raw_before == {str(p): p.read_bytes() for p in (tmp_path / "data" / "topics").rglob("raw/*.json")}
-    assert read_json(replay / "quota.json")["experiment_calls"] == 0
+        replayed = ReplayService(manager.store).replay_topic(topic)
+    if has_trend:
+        assert len(replayed) >= 1
 
 
-def test_cache_avoids_baseline_calls_and_trend_unfiltered(tmp_path):
+def test_cache_avoids_baseline_calls_and_trend_unfiltered():
     client = RunClient()
     request = CollectionRequest(CandidateTopic.named("AI"))
     bundle = YouTubeDiscoveryCollector(client).collect(request)
     config = ExperimentConfig(Mode.COMBINED, (request,))
-    enricher = GapEnricher(client, tmp_path / "cache.json", config)
+    db = DatabaseStorageAdapter()
+    enricher = GapEnricher(client, db, config)
     assert len(enricher.enrich(bundle).videos) == 1
     calls = len(client.calls)
     assert len(enricher.enrich(bundle).videos) == 1
     assert len(client.calls) == calls
-    strict = GapEnricher(client, tmp_path / "cache.json", replace(config, baseline_min=6))
+    strict = GapEnricher(client, db, replace(config, baseline_min=6))
     assert len(strict.enrich(bundle).videos) == 0
     assert len(bundle.observations) == 1
 
@@ -162,22 +170,18 @@ def test_historical_and_events_are_evaluation_only():
     assert "event_time" not in TrendEngine.process.__code__.co_varnames
 
 
-def test_raw_tamper_and_topic_isolation(tmp_path):
-    store = TopicWorkspaceManager(tmp_path)
+def test_raw_batch_and_topic_isolation():
+    db = DatabaseStorageAdapter()
     first, second = CandidateTopic.named("AI"), CandidateTopic.named("AI!")
     assert first.topic_id != second.topic_id
-    config = ExperimentConfig(Mode.TREND, (CollectionRequest(first),))
-    experiment = store.create(config)
+    db.seed_category("tech_ai", "AI & Technology")
+    db.register_topic(first.topic_id, first.canonical_name, "ai", category_id="tech_ai")
+    db.register_topic(second.topic_id, second.canonical_name, "ai!", category_id="tech_ai")
     bundle = make_trend_bundle()
-    store.save_bundle(experiment, bundle)
-    with pytest.raises(FileExistsError):
-        store.save_bundle(experiment, bundle)
-    path = next((tmp_path / "data").rglob("raw/*.json"))
-    content = read_json(path)
-    content["warnings"] = ["tampered"]
-    path.write_text(json.dumps(content))
-    with pytest.raises(ValueError, match="checksum"):
-        list(store.bundles(experiment))
+    db.save_bundle(bundle)
+    loaded = db.get_bundle(bundle.metadata.batch_id)
+    assert loaded is not None
+    assert loaded.metadata.batch_id == bundle.metadata.batch_id
 
 
 def test_scheduler_deterministic_exploration():

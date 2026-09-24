@@ -3,6 +3,7 @@
 CreatorRadar Research is a modular desktop research laboratory designed for deterministic YouTube trend analysis and content gap detection. The codebase enforces strict separation of concerns across presentation, orchestration, domain logic, mathematical calculation, and infrastructure.
 
 For a step-by-step description of data collection, enrichment, and storage, see [DATA_PIPELINE.md](file:///d:/Programming/Projects/GitHub/CR_ytAPI/docs/DATA_PIPELINE.md).
+For the canonical mathematical specification of the Trend Engine, see [YOUTUBE_TREND_ENGINE_SPEC.md](file:///d:/Programming/Projects/GitHub/CR_ytAPI/docs/YOUTUBE_TREND_ENGINE_SPEC.md).
 
 ---
 
@@ -132,3 +133,77 @@ The `ReplayService` allows researchers to:
   1. Create a platform-specific ingestion collector adhering to the `CollectionBundle` domain contract.
   2. Provide explicit publication and observation timestamps.
   3. Never fabricate or renormalize missing platform metrics as zeros.
+
+---
+
+## 7. Platform Architecture: Database, Multi-Worker Fleet, NLP Triage & Main App Gateway
+
+To support horizontal scalability, category pools, asynchronous NLP classification, and seamless integration with downstream applications, the system features a relational database coordination plane:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           External Integrations                             │
+│                                                                             │
+│   ┌─────────────────────────────┐       ┌───────────────────────────────┐   │
+│   │    Main App / Client UI     │       │      NLP Triage Service       │   │
+│   │   (Dashboards, Analytics,   │       │   (Category Classification,   │   │
+│   │   Topic Subscriptions/Pins) │       │   Entity Extraction, Audits)  │   │
+│   └──────────────┬──────────────┘       └───────────────▲───────────────┘   │
+└──────────────────┼──────────────────────────────────────┼───────────────────┘
+                   │ HTTP / Read Gateway                  │ Async Triage Queue
+┌──────────────────▼──────────────────────────────────────▼───────────────────┐
+│              Central Relational State Store (SQLite WAL / PostgreSQL)       │
+│                                                                             │
+│   • categories           • topics (cadence, state, atomic leases)           │
+│   • raw_batches (JSON)   • metrics_trend & metrics_gap                      │
+│   • creator_baselines    • quota_ledger (shared atomic daily token pool)    │
+└──────────────────▲──────────────────────────────────────────────────────────┘
+                   │
+                   │ Task Leasing (BEGIN IMMEDIATE / SKIP LOCKED)
+┌──────────────────┴──────────────────────────────────────────────────────────┐
+│                   Stateless Ingestion Fleet (Worker Daemons)                │
+│                                                                             │
+│   ┌─────────────────────────┐           ┌───────────────────────────────┐   │
+│   │     Worker Node 1       │   ...     │        Worker Node N          │   │
+│   │  (Lease, Quota Check,   │           │   (Lease, Quota Check,        │   │
+│   │   Discovery, Tracking)  │           │    Discovery, Tracking)       │   │
+│   └────────────┬────────────┘           └───────────────┬───────────────┘   │
+│                │                                        │                   │
+│                └───────────────────┬────────────────────┘                   │
+│                                    │                                        │
+│                 ┌──────────────────▼──────────────────┐                     │
+│                 │   Pure Domain & Mathematical Engine │                     │
+│                 │  (GapEngine, TrendEngine, Baselines)│                     │
+│                 │       *Strictly Network-Free*       │                     │
+│                 └──────────────────┬──────────────────┘                     │
+└────────────────────────────────────┼────────────────────────────────────────┘
+                                     │ Guarded HTTP Client
+                                     ▼
+                       YouTube Data API v3 (Google)
+```
+
+### 7.1 Database Coordination Plane (`research.storage.db`)
+- **Zero Inter-Worker Communication**: Workers never communicate directly. All task coordination is handled via atomic database transactions and leases.
+- **Atomic Task Leasing**: `DatabaseStorageAdapter.claim_due_topic(worker_id)` claims due topics atomically. Expired leases (`locked_until < now`) are automatically reclaimed if a worker crashes.
+- **Shared Atomic Quota Ledger**: Central daily quota tracking on the Pacific midnight boundary.
+- **Adaptive Cadence Throttling**: Rather than rigid percentage division per topic, workers check the daily quota ledger. When remaining search quota $\le 20\%$, cadences adaptively step down (`FAST` $\rightarrow$ `REGULAR` $\rightarrow$ `SLOW`); when search quota reaches 0%, discovery halts while cheap tracking (`videos.list`) continues.
+
+### 7.2 Stateless Ingestion Fleet (`research.workers.collector`)
+- **`IngestionWorker`**: Autonomous daemons polling for due topics, checking remaining daily quota, executing discovery or tracking cycles, persisting raw bundles and calculated metric snapshots, and dynamically updating topic cadences and lifecycle states.
+
+### 7.3 Category Pools & Rollups (`research.categories.service`)
+- **Category Abstraction**: Topics belong to dynamic category pools (e.g. `gaming`, `tech_ai`, `finance_crypto`, `science_space`, `entertainment`).
+- **Aggregate Momentum**: Automatic rollups compute category-level average velocity/trend scores and breakout counts.
+
+### 7.4 Asynchronous NLP Triage (`research.nlp`)
+- **Decoupled Classification**: New topics are inserted with `status = 'PENDING_CLASSIFICATION'`. The `NLPTriageWorker` classifies them asynchronously into the appropriate category pool and promotes them to `'ACTIVE'` without blocking API collection loops.
+- **Graceful Fallback**: If classification confidence is low, topics are assigned to `'uncategorized'`, ensuring collection is never stalled.
+
+### 7.5 Main App API Gateway (`research.gateway.server`)
+- **Stateless REST Gateway**:
+  - `GET /api/categories`: Lists all active categories, aggregate momentum, and breakout counts.
+  - `GET /api/categories/{category_id}/topics`: Lists category topics with current lifecycle states and trend scores.
+  - `GET /api/topics/{topic_id}/metrics`: Returns historical time-series data for charting.
+  - `POST /api/topics`: Registers new topics (user manual selection) into the pending NLP queue.
+  - `PATCH /api/topics/{topic_id}/cadence`: Manually adjusts or pauses topic collection (`FAST`, `REGULAR`, `SLOW`, `STOPPED`).
+

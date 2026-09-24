@@ -12,14 +12,14 @@ from research.metrics.evaluation import HistoricalAnalyzer
 from research.metrics.gap import GapEngine
 from research.metrics.tracking import TrackedVideoRegistry
 from research.metrics.trend import TrendConfig, TrendEngine
-from research.storage.workspace import TopicWorkspaceManager
+from research.storage.db import DatabaseStorageAdapter
 
 
 class MetricProcessor:
     """Network-free calculation boundary shared by live experiment runs and offline replay."""
 
-    def __init__(self, config: ExperimentConfig, store: TopicWorkspaceManager, experiment: Path) -> None:
-        self.config, self.store, self.experiment = config, store, experiment
+    def __init__(self, config: ExperimentConfig, store: DatabaseStorageAdapter, run_id: str) -> None:
+        self.config, self.store, self.run_id = config, store, run_id
         self.gap = GapEngine(MetricConfig(**config.gap_formula))
         self.gap_states: dict[str, Any] = {}
         self.trends: dict[str, TrendEngine] = {}
@@ -39,13 +39,18 @@ class MetricProcessor:
             self.counts["historical_buckets"] += len(rows)
         elif self.config.mode != Mode.GAP:
             trend = self.trends.setdefault(topic_id, TrendEngine(TrendConfig(**self.config.trend_formula)))
-            deltas = self.registry(topic_id).observe(bundle.observations)
+            deltas = self.registry(topic_id).observe(bundle.observations, baseline=trend.baseline)
             engagement = trend.engagement(deltas)
             for delta in deltas:
                 rows.append(
                     (
                         "tracking",
-                        {**asdict(delta), "topic": bundle.topic.canonical_name, "engagement": engagement},
+                        {
+                            **asdict(delta),
+                            "topic": bundle.topic.canonical_name,
+                            "engagement": engagement,
+                            "engagement_E_YT": engagement,
+                        },
                     )
                 )
             self.counts["counter_deltas"] += len(deltas)
@@ -54,8 +59,6 @@ class MetricProcessor:
                 if snapshot:
                     rows.append(("trend", snapshot))
                     self.counts["trend_snapshots"] += 1
-            self.store.state(self.experiment, topic_id, "trend", trend.state)
-            self.store.state(self.experiment, topic_id, "tracking", self.registry(topic_id).state())
         if gap_batch is not None and gap_batch.videos:
             snapshot, state = self.gap.process(gap_batch, self.gap_states.get(topic_id))
             self.gap_states[topic_id] = state
@@ -71,7 +74,18 @@ class MetricProcessor:
                 )
             )
             self.counts["gap_snapshots"] += 1
-            self.store.state(self.experiment, topic_id, "gap", state.to_dict())
         for kind, row in rows:
-            self.store.metric(self.experiment, topic_id, kind, row)
+            if kind == "trend":
+                self.store.save_trend_metric(topic_id, bundle.metadata.batch_id, bundle.metadata.finished_at, row)
+            elif kind == "gap":
+                self.store.save_gap_metric(
+                    topic_id,
+                    bundle.metadata.batch_id,
+                    bundle.metadata.finished_at,
+                    row.get("gap_score", 0.0),
+                    row.get("demand_norm", 0.0),
+                    row.get("supply_norm", 0.0),
+                    row.get("creator_authority", 0.0),
+                    row
+                )
         return rows

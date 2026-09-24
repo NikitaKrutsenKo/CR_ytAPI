@@ -159,7 +159,9 @@ def log_min_max_normalize(
     return max(0.0, min(1.0, normalized))
 
 
-def weighted_state_update(previous: float, current: float, delta_hours: float, half_life_hours: float) -> float:
+def weighted_state_update(
+    previous: float, current: float, delta_hours: float, half_life_hours: float
+) -> float:
     """Update an exponential moving average (EMA) state given elapsed time and half-life.
 
     Formula:
@@ -199,10 +201,7 @@ def creator_median_views_rate(video: RawTopicVideo, epsilon: float) -> float:
     Returns:
         Median baseline view velocity for the creator.
     """
-    rates = [
-        view_rate(stat.views, stat.video_age_hours, epsilon)
-        for stat in video.recent_video_stats
-    ]
+    rates = [view_rate(stat.views, stat.video_age_hours, epsilon) for stat in video.recent_video_stats]
     if not rates:
         raise ValueError(f"Video {video.video_id} has no recent video stats")
     return median(rates)

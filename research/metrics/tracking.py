@@ -26,6 +26,8 @@ class CounterDelta:
         comment_rate: Ratio of delta_comments / delta_views.
         correction: True if counter decreased (YouTube correction).
         age_bucket: Age cohort category ('0_24h', '24_168h', '168h_plus').
+        media_velocity_V_YT: Historical same-age percentile for view velocity.
+        video_age_at_observation: Video age in hours at observation time.
     """
 
     video_id: str
@@ -41,6 +43,8 @@ class CounterDelta:
     comment_rate: float | None
     correction: bool
     age_bucket: str
+    media_velocity_V_YT: float | None = None
+    video_age_at_observation: float | None = None
 
 
 class TrackedVideoRegistry:
@@ -55,7 +59,7 @@ class TrackedVideoRegistry:
         """Tuple of tracked video IDs."""
         return tuple(self.latest)
 
-    def observe(self, observations: tuple[VideoObservation, ...]) -> list[CounterDelta]:
+    def observe(self, observations: tuple[VideoObservation, ...], baseline=None) -> list[CounterDelta]:
         """Update registry with new observations and compute counter deltas against prior state."""
         results = []
         for current in observations:
@@ -76,17 +80,31 @@ class TrackedVideoRegistry:
                 rates = [None if v is None or v < 0 else v / hours for v in changes]
                 views, likes, comments = changes
                 eligible = not correction and views is not None and views >= 100
+                bucket = self.age_bucket(current)
+                age_hours = (
+                    utc(current.timestamp) - utc(current.identity.published_at)
+                ).total_seconds() / 3600
+                v_yt = None
+                if baseline is not None and rates[0] is not None:
+                    v_yt = baseline.percentile_views_per_hour(rates[0], bucket)
+
                 results.append(
                     CounterDelta(
-                        identifier,
-                        current.timestamp,
-                        hours,
-                        *changes,
-                        *rates,
-                        likes / views if eligible and likes is not None else None,
-                        comments / views if eligible and comments is not None else None,
-                        correction,
-                        self.age_bucket(current),
+                        video_id=identifier,
+                        timestamp=current.timestamp,
+                        elapsed_hours=hours,
+                        delta_views=views,
+                        delta_likes=likes,
+                        delta_comments=comments,
+                        views_per_hour=rates[0],
+                        likes_per_hour=rates[1],
+                        comments_per_hour=rates[2],
+                        like_rate=likes / views if eligible and likes is not None else None,
+                        comment_rate=comments / views if eligible and comments is not None else None,
+                        correction=correction,
+                        age_bucket=bucket,
+                        media_velocity_V_YT=v_yt,
+                        video_age_at_observation=age_hours,
                     )
                 )
             self.latest[identifier] = current

@@ -8,6 +8,7 @@ A local Windows desktop laboratory for Gap and YouTube Trend research. Raw obser
 - **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**: Architectural layers, dependency rules, invariants, and package structure.
 - **[DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md)**: Setup, testing, debugging, and codebase extension guide.
 - **[FORMULAS.md](docs/FORMULAS.md)**: Mathematical formulas, equations, and research adaptations for Gap and Trend engines.
+- **[YOUTUBE_TREND_ENGINE_SPEC.md](docs/YOUTUBE_TREND_ENGINE_SPEC.md)**: Canonical research specification and mathematical contracts for the YouTube Trend Engine.
 
 ## Windows Setup and Launch
 

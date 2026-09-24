@@ -64,9 +64,7 @@ class MetricsState:
             "topic_rate": self.topic_rate,
             "supply": self.supply,
             "demand": self.demand,
-            "normalization": {
-                key: value.to_dict() for key, value in self.normalization.items()
-            },
+            "normalization": {key: value.to_dict() for key, value in self.normalization.items()},
         }
 
     @classmethod

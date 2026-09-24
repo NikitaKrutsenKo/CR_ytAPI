@@ -1,67 +1,74 @@
-"""Offline replay of stored raw observations through metric calculation engines."""
+"""Offline replay of stored raw observations through pure metric calculation engines."""
 
 from __future__ import annotations
 
-from dataclasses import replace
-from pathlib import Path
+import json
+import logging
+from collections.abc import Callable
+from typing import Any
 
-from research.core.configuration import resolve_formulas
-from research.core.domain import ExperimentConfig, fingerprint
-from research.metrics.processing import MetricProcessor
-from research.storage.io import read_json, read_jsonl, write_json
-from research.storage.raw_batch_store import batch_from_dict
-from research.storage.workspace import TopicWorkspaceManager
+from research.core.domain import CollectionBundle
+from research.metrics.tracking import TrackedVideoRegistry
+from research.metrics.trend import TrendConfig, TrendEngine
+from research.storage.db import DatabaseStorageAdapter
+
+log = logging.getLogger(__name__)
 
 
 class ReplayService:
-    """Re-executes calculations over verified stored raw batches with zero network access."""
+    """Re-executes calculations over stored raw batches with zero network access."""
 
-    def __init__(self, root: Path) -> None:
-        self.store = TopicWorkspaceManager(root)
+    def __init__(self, db: DatabaseStorageAdapter | None = None) -> None:
+        self.db = db or DatabaseStorageAdapter()
+
+    def replay_bundles(
+        self,
+        bundles: list[CollectionBundle],
+        trend_config: TrendConfig | None = None,
+        notify: Callable[[dict[str, Any]], None] = lambda event: None,
+    ) -> list[dict[str, Any]]:
+        """Replay an ordered sequence of CollectionBundles through pure mathematical engines.
+
+        Zero network calls. Deterministically computes tracking deltas, engagement,
+        EWMA, velocity, acceleration, Growth, Burst, Breadth, and YouTube Trend Score.
+        """
+        if not bundles:
+            return []
+
+        config = trend_config or TrendConfig()
+        trend_engine = TrendEngine(config)
+        registry = TrackedVideoRegistry(limit=100)
+        snapshots: list[dict[str, Any]] = []
+
+        for bundle in bundles:
+            deltas = registry.observe(bundle.observations, baseline=trend_engine.baseline)
+            trend_engine.engagement(deltas)
+            if bundle.metadata.operation == "discovery":
+                step = trend_engine.process(bundle)
+                if step:
+                    snapshots.append(step)
+                    notify({"operation": "replay_step", "batch_id": bundle.metadata.batch_id, "row": step})
+
+        return snapshots
+
+    def replay_topic(
+        self,
+        topic_id: str,
+        trend_config: TrendConfig | None = None,
+        notify: Callable[[dict[str, Any]], None] = lambda event: None,
+    ) -> list[dict[str, Any]]:
+        """Replay all stored raw batches for a topic from the PostgreSQL raw_batches table."""
+        bundles = self.db.get_raw_batches(topic_id)
+        if not bundles:
+            return []
+        return self.replay_bundles(bundles, trend_config=trend_config, notify=notify)
 
     def run(
         self,
-        source: Path,
+        topic_id: str,
+        trend_config: TrendConfig | None = None,
         gap_formula: dict | None = None,
-        trend_formula: dict | None = None,
-        notify=lambda event: None,
-    ) -> Path:
-        """Run replay on an existing experiment, producing a new derived experiment workspace."""
-        metadata = read_json(source / "experiment.json")
-        if fingerprint(metadata["config"]) != metadata["config_hash"]:
-            raise ValueError("Experiment configuration checksum mismatch")
-        config = ExperimentConfig.from_dict(metadata["config"])
-        config = replace(
-            config,
-            gap_formula=gap_formula if gap_formula is not None else config.gap_formula,
-            trend_formula=trend_formula if trend_formula is not None else config.trend_formula,
-        )
-        config = resolve_formulas(config)
-        bundles = list(self.store.bundles(source))
-        if not bundles:
-            raise ValueError("Replay dataset is empty")
-        manifest_path = source / "enrichment_manifest.jsonl"
-        enrichment_hashes = (
-            {v["batch_id"]: v["sha256"] for v in read_jsonl(manifest_path)} if manifest_path.exists() else {}
-        )
-        for batch_id, expected in enrichment_hashes.items():
-            if fingerprint(read_json(source / "enrichment" / (batch_id + ".json"))) != expected:
-                raise ValueError("Creator baseline checksum mismatch")
-        experiment = self.store.create(config, parent=source.name)
-        processor = MetricProcessor(config, self.store, experiment)
-        for bundle in bundles:
-            enrichment = source / "enrichment" / (bundle.metadata.batch_id + ".json")
-            batch = batch_from_dict(read_json(enrichment)) if enrichment.exists() else None
-            if batch:
-                write_json(experiment / "enrichment" / enrichment.name, batch.to_dict(), True)
-            rows = processor.process(bundle, batch)
-            notify({"operation": "replay_batch", "experiment_id": experiment.name, "rows": rows})
-        if manifest_path.exists():
-            (experiment / "enrichment_manifest.jsonl").write_bytes(manifest_path.read_bytes())
-        (experiment / "inputs.jsonl").write_bytes((source / "inputs.jsonl").read_bytes())
-        write_json(experiment / "quota.json", {"label": "Offline replay", "experiment_calls": 0})
-        write_json(
-            experiment / "summary.json", {"status": "COMPLETE", "replay_of": source.name, **processor.counts}
-        )
-        self.store.event(experiment, "replay_completed", source=source.name)
-        return experiment
+        notify: Callable[[dict[str, Any]], None] = lambda event: None,
+    ) -> list[dict[str, Any]]:
+        """Run replay for a topic, returning calculated metric snapshots."""
+        return self.replay_topic(topic_id=str(topic_id), trend_config=trend_config, notify=notify)

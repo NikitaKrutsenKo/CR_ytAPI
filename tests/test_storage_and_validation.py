@@ -10,15 +10,11 @@ from research.core.models import (
     Topic,
     YouTubeBatch,
 )
-from research.storage.raw_batch_store import RawBatchStore
 from research.storage.validator import ValidationError, validate_batch, validate_snapshot
 
 
 def make_batch() -> YouTubeBatch:
-    stats = [
-        RecentVideoStat(f"recent-{i}", float(i + 1), 100 * (i + 1))
-        for i in range(5)
-    ]
+    stats = [RecentVideoStat(f"recent-{i}", float(i + 1), 100 * (i + 1)) for i in range(5)]
     video = RawTopicVideo(
         video_id="topic-video",
         channel_id="channel",
@@ -35,14 +31,6 @@ def make_batch() -> YouTubeBatch:
         collection=CollectionInfo("2026-09-14T09:00:00Z", "batch-1", 1),
         videos=[video],
     )
-
-
-def test_raw_batch_roundtrip(tmp_path):
-    store = RawBatchStore(tmp_path / "raw.jsonl")
-    batch = make_batch()
-    store.append(batch)
-    loaded = list(store.read_all())
-    assert loaded == [batch]
 
 
 def test_batch_rejects_too_few_recent_videos():
@@ -139,7 +127,7 @@ def test_write_and_read_json_compact_and_gzip(tmp_path):
     write_json(pretty_path, payload)
     pretty_text = pretty_path.read_text(encoding="utf-8")
     assert "\n" in pretty_text
-    assert "  \"key\": \"value\"" in pretty_text
+    assert '  "key": "value"' in pretty_text
     assert read_json(pretty_path) == payload
 
     # Compact test
@@ -188,23 +176,22 @@ def test_youtube_client_close_and_context_manager():
     mock_session_ctx.close.assert_called_once()
 
 
-def test_gap_enricher_prunes_cache(tmp_path):
+def test_gap_enricher_requires_db():
     from research.metrics.gap import GapEnricher
-    from research.storage.io import write_json
 
-    cache_file = tmp_path / "creator_cache.json"
-    dummy_cache = {
-        "ch_1": {"last_refresh": "2026-09-01T00:00:00Z"},
-        "ch_2": {"last_refresh": "2026-09-02T00:00:00Z"},
-        "ch_3": {"last_refresh": "2026-09-03T00:00:00Z"},
-        "ch_4": {"last_refresh": "2026-09-04T00:00:00Z"},
-    }
-    write_json(cache_file, dummy_cache)
+    with pytest.raises(RuntimeError, match="DatabaseStorageAdapter connection required"):
+        GapEnricher(None, None, None)
 
-    enricher = GapEnricher(None, cache_file, None, max_entries=2)
-    assert len(enricher.cache) == 2
-    assert "ch_3" in enricher.cache
-    assert "ch_4" in enricher.cache
-    assert "ch_1" not in enricher.cache
-    assert "ch_2" not in enricher.cache
 
+def test_creator_baseline_storage_and_pruning():
+    from research.storage.db import DatabaseStorageAdapter
+
+    db = DatabaseStorageAdapter()
+    db.save_creator_baseline("ch_expired", 10.5, 5, {"test": 1}, ttl_hours=-1)
+    db.save_creator_baseline("ch_active", 25.0, 10, {"test": 2}, ttl_hours=24)
+
+    assert db.get_creator_baseline("ch_active") is not None
+    pruned = db.prune_expired_creator_baselines()
+    assert pruned >= 1
+    assert db.get_creator_baseline("ch_expired") is None
+    assert db.get_creator_baseline("ch_active") is not None

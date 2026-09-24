@@ -77,9 +77,7 @@ def validate_metrics_csv(path: str | Path, required_columns: Iterable[str]) -> t
         for row_number, row in enumerate(reader, start=2):
             timestamp = row["timestamp"]
             if previous_timestamp is not None and timestamp <= previous_timestamp:
-                raise ValidationError(
-                    f"Timestamps must be strictly increasing; row {row_number} is not"
-                )
+                raise ValidationError(f"Timestamps must be strictly increasing; row {row_number} is not")
             previous_timestamp = timestamp
             for column in columns:
                 if column in {"timestamp", "topic"}:
@@ -87,9 +85,7 @@ def validate_metrics_csv(path: str | Path, required_columns: Iterable[str]) -> t
                 try:
                     value = float(row[column])
                 except (TypeError, ValueError) as exc:
-                    raise ValidationError(
-                        f"Non-numeric value in column {column}, row {row_number}"
-                    ) from exc
+                    raise ValidationError(f"Non-numeric value in column {column}, row {row_number}") from exc
                 if not math.isfinite(value):
                     raise ValidationError(f"Non-finite value in {column}, row {row_number}")
             count += 1

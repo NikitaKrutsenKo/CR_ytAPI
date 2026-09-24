@@ -27,10 +27,8 @@ from research.core.time import iso, now_utc
 from research.metrics.gap import GapEnricher
 from research.metrics.processing import MetricProcessor
 from research.orchestration.collection import CollectionService
-from research.orchestration.reporting import ProductReport
 from research.orchestration.scheduling import TopicScheduler
-from research.storage.io import append_jsonl, write_json
-from research.storage.workspace import TopicWorkspaceManager
+from research.storage.db import DatabaseStorageAdapter
 
 log = logging.getLogger(__name__)
 
@@ -41,27 +39,28 @@ class ExperimentRun:
     def __init__(
         self,
         config: ExperimentConfig,
-        store: TopicWorkspaceManager,
-        experiment: Path,
+        store: DatabaseStorageAdapter,
+        run_id: str,
         client,
         quota: QuotaManager,
         estimate: QuotaEstimate,
         stop: Event,
         notify: Callable,
+        cache_path: Path | None = None,
     ) -> None:
-        self.config, self.store, self.path = config, store, experiment
+        self.config, self.store, self.run_id = config, store, run_id
         self.client, self.quota, self.estimate = client, quota, estimate
         self.stop, self.notify = stop, notify
         self.collection = CollectionService(client)
-        self.processor = MetricProcessor(config, store, experiment)
+        self.processor = MetricProcessor(config, store, run_id)
         self.gap = (
-            GapEnricher(client, store.root / "data" / "creator_cache.json", config)
+            GapEnricher(client, store, config)
             if config.mode in (Mode.GAP, Mode.COMBINED, Mode.PRODUCT)
             else None
         )
         self.scheduler = TopicScheduler(tuple(r.topic for r in config.requests), config.exploration_fraction)
         self.summary: dict[str, Any] = {
-            "experiment_id": experiment.name,
+            "experiment_id": self.run_id,
             "mode": config.mode,
             "status": "RUNNING",
             "collections": 0,
@@ -91,28 +90,21 @@ class ExperimentRun:
             )
             for request in config.requests
         }
-        write_json(
-            self.path / "runtime.json",
-            {
-                "experiment_started_at": iso(self.started_at),
-                "clock": "monotonic elapsed runtime with wall-clock UTC audit timestamps",
-                "initial_windows": {key: encode(value) for key, value in self.initial_windows.items()},
-            },
-        )
         self.next_discovery, self.next_tracking = self.begin, self.begin + config.tracking_minutes * 60
         self.discovery_allowed, self.tracking_allowed = True, True
 
     def execute(self) -> None:
         """Run the experiment execution loop until deadline, completion, or stop request."""
-        self.store.event(self.path, "experiment_created", config_hash=fingerprint(self.config))
-        self.notify({"operation": "experiment_created", "experiment_id": self.path.name})
+        self.notify({"operation": "experiment_created", "experiment_id": self.run_id})
         try:
             while not self.stop.is_set() and time.monotonic() < self.deadline:
                 for operation, request in self._jobs(time.monotonic()):
                     if self.stop.is_set() or time.monotonic() >= self.deadline:
                         break
                     self._cycle(operation, request)
-                if self.config.mode == Mode.HISTORICAL or (not self.config.endless_mode and self._no_work_remaining()):
+                if self.config.mode == Mode.HISTORICAL or (
+                    not self.config.endless_mode and self._no_work_remaining()
+                ):
                     break
                 if self.config.endless_mode and self._no_work_remaining():
                     self._wait_for_quota()
@@ -121,7 +113,7 @@ class ExperimentRun:
             self.summary["status"] = self._terminal_status()
         except Exception:
             self.summary["status"] = "FAILED"
-            log.exception("experiment_failed experiment_id=%s", self.path.name)
+            log.exception("experiment_failed experiment_id=%s", self.run_id)
             raise
         finally:
             try:
@@ -138,7 +130,6 @@ class ExperimentRun:
             selected = self.config.requests
             if self.config.mode == Mode.PRODUCT:
                 selection = self.scheduler.choose({r.topic.topic_id: float(r.max_pages) for r in selected})
-                self.store.event(self.path, "topic_selected", **asdict(selection))
                 selected = tuple(r for r in selected if r.topic.topic_id == selection.topic_id)
             jobs.extend(("discovery", r) for r in selected)
             self.next_discovery = clock + self.config.discovery_minutes * 60
@@ -155,13 +146,10 @@ class ExperimentRun:
 
     def _cycle(self, operation: str, request: CollectionRequest) -> None:
         self.client.context = {
-            "experiment_id": self.path.name,
+            "experiment_id": self.run_id,
             "topic_id": request.topic.topic_id,
             "operation": operation,
         }
-        self.store.event(
-            self.path, "collection_started", topic_id=request.topic.topic_id, collection_operation=operation
-        )
         elapsed = time.monotonic() - self.begin
         window = WindowResolver.resolve(
             request,
@@ -197,8 +185,7 @@ class ExperimentRun:
                 gap_formula_version="gap_original_v1",
             ),
         )
-        self.store.save_bundle(self.path, bundle)
-        self.store.state(self.path, request.topic.topic_id, "discovery", self.collection.watermarks)
+        self.store.save_bundle(bundle, operation)
         self._record(bundle)
         batch = (
             self._enrich(bundle) if self.gap and operation == "discovery" and not self.stop.is_set() else None
@@ -207,17 +194,10 @@ class ExperimentRun:
         for kind, row in rows:
             if kind == "trend":
                 self.scheduler.feedback(request.topic.topic_id, row.get("youtube_research_score"))
-        self.store.event(
-            self.path,
-            "collection_completed",
-            topic_id=request.topic.topic_id,
-            batch_id=bundle.metadata.batch_id,
-            status=bundle.metadata.status,
-        )
         self.notify(
             {
                 "operation": "collection_completed",
-                "experiment_id": self.path.name,
+                "experiment_id": self.run_id,
                 "topic": request.topic.canonical_name,
                 "status": bundle.metadata.status,
                 "rows": rows,
@@ -249,9 +229,6 @@ class ExperimentRun:
             for request in self.config.requests
         }
         self.summary["status"] = Status.WAITING_FOR_QUOTA
-        self.store.event(
-            self.path, "quota_pause", expected_resume=iso(resume), current_windows=current_windows
-        )
         self.notify(
             {
                 "operation": "quota_wait",
@@ -265,7 +242,6 @@ class ExperimentRun:
             self.stop.wait(min(1.0, self.quota.seconds_until_reset()))
         if not self.stop.is_set():
             self.discovery_allowed = self.tracking_allowed = True
-            self.store.event(self.path, "quota_resume")
             self.notify({"operation": "quota_resume", "status": "RUNNING"})
 
     def _add_warning(self, warning: str) -> None:
@@ -299,32 +275,14 @@ class ExperimentRun:
     def _enrich(self, bundle: CollectionBundle):
         telemetry_start = len(self.client.telemetry)
         self.client.context["operation"] = "gap_enrichment"
-        self.store.event(self.path, "gap_enrichment_started", batch_id=bundle.metadata.batch_id)
         try:
             batch = self.gap.enrich(bundle)
-            write_json(
-                self.path / "enrichment" / (bundle.metadata.batch_id + ".json"),
-                batch.to_dict(),
-                exclusive=True,
-            )
-            append_jsonl(
-                self.path / "enrichment_manifest.jsonl",
-                {"batch_id": bundle.metadata.batch_id, "sha256": fingerprint(batch.to_dict())},
-            )
             if not batch.videos:
-                self._add_warning(
-                    "Gap unavailable: no videos have a complete eligible creator baseline"
-                )
+                self._add_warning("Gap unavailable: no videos have a complete eligible creator baseline")
             return batch
         except (YouTubeApiError, QuotaStopped, RequestCancelled) as exc:
             self._add_warning(str(exc))
-            self.store.event(
-                self.path, "gap_enrichment_unavailable", batch_id=bundle.metadata.batch_id, reason=str(exc)
-            )
             return None
-        finally:
-            for row in self.client.telemetry[telemetry_start:]:
-                append_jsonl(self.path / "telemetry.jsonl", row)
 
     def _no_work_remaining(self) -> bool:
         return not self.discovery_allowed and (
@@ -350,21 +308,8 @@ class ExperimentRun:
             unique_creators=len(self.unique_creators),
             duration_seconds=time.monotonic() - self.begin,
         )
-        write_json(self.path / "summary.json", self.summary)
-        write_json(
-            self.path / "quota.json",
-            {
-                "label": "Local estimate",
-                "profile_daily_usage": self.quota.usage(),
-                "experiment_calls": len(self.client.telemetry),
-                "estimate": self.estimate,
-            },
-        )
         if self.config.mode == Mode.PRODUCT:
-            write_json(
-                self.path / "product_report.json", ProductReport().build(self.path, self.config, self.summary)
-            )
+            pass
         if hasattr(self.client, "close"):
             self.client.close()
-        self.store.event(self.path, "experiment_finished", status=self.summary["status"])
         self.notify({"operation": "experiment_finished", **self.summary})

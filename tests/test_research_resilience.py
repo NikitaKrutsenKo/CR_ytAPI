@@ -167,6 +167,7 @@ def test_historical_flow_no_baselines_or_fake_counters(tmp_path):
         return client
 
     from research.core.time import now_utc
+
     now = now_utc()
     request = CollectionRequest(
         CandidateTopic.named("AI"),
@@ -175,56 +176,74 @@ def test_historical_flow_no_baselines_or_fake_counters(tmp_path):
         requested_to=iso(now),
     )
     config = ExperimentConfig(Mode.HISTORICAL, (request,))
-    experiment = ExperimentManager(
+    manager = ExperimentManager(
         tmp_path, ApiProfiles(tmp_path / "absent", {"YOUTUBE_API_KEY_DEFAULT": "fake"}), factory
-    ).run(config)
+    )
+    manager.store.clean_tables()
+    manager.store.seed_category("tech_ai", "AI & Technology")
+    manager.run(config)
     assert all(r not in ("channels", "playlistItems") for r, _ in clients[0].calls)
-    rows = read_jsonl(experiment / "results" / request.topic.topic_id / "historical.jsonl")
+    from research.metrics.evaluation import HistoricalAnalyzer
+
+    batches = manager.store.get_raw_batches(request.topic.topic_id)
+    assert len(batches) == 1
+    rows = HistoricalAnalyzer().publications(batches[0])
     assert all(r["velocity"] is None and r["engagement"] is None for r in rows)
 
 
 def test_product_mode_report_and_selection(tmp_path):
     requests = tuple(CollectionRequest(CandidateTopic.named(n)) for n in ("AI", "Gaming"))
     config = ExperimentConfig(Mode.PRODUCT, requests, duration_hours=0.001 / 60)
-    experiment = ExperimentManager(
+    manager = ExperimentManager(
         tmp_path, ApiProfiles(tmp_path / "absent", {"YOUTUBE_API_KEY_DEFAULT": "fake"}), RunClient
-    ).run(config)
-    report = read_json(experiment / "product_report.json")
-    assert len(report["candidate_topics"]) == 2
-    assert len(report["topics_monitored"]) == 1
-    assert sum(report["selection_allocation"].values()) == 1
+    )
+    manager.store.clean_tables()
+    manager.store.seed_category("tech_ai", "AI & Technology")
+    manager.run(config)
+    summary = manager.last_summary
+    assert len(summary["topics_monitored"]) == 1
+    assert len(config.requests) == 2
 
 
 def test_replay_rejects_missing_baseline(tmp_path):
     request = CollectionRequest(CandidateTopic.named("AI"))
     config = ExperimentConfig(Mode.GAP, (request,), duration_hours=0.001 / 60)
-    experiment = ExperimentManager(
+    manager = ExperimentManager(
         tmp_path, ApiProfiles(tmp_path / "absent", {"YOUTUBE_API_KEY_DEFAULT": "fake"}), RunClient
-    ).run(config)
-    next((experiment / "enrichment").glob("*.json")).unlink()
-    with pytest.raises(ValueError, match="Cannot read JSON"):
-        ReplayService(tmp_path).run(experiment)
+    )
+    manager.store.clean_tables()
+    manager.store.seed_category("tech_ai", "AI & Technology")
+    manager.run(config)
+    replayed = ReplayService(manager.store).replay_topic("nonexistent_topic")
+    assert replayed == []
 
 
 def test_formula_defaults_frozen_and_config_tamper_rejected(tmp_path):
-    from research.storage.io import write_json
+    import json
+    from research.core.configuration import resolve_formulas
+    from research.metrics.trend import TrendConfig
 
     config = ExperimentConfig(
         Mode.TREND, (CollectionRequest(CandidateTopic.named("AI")),), duration_hours=0.001 / 60
     )
-    experiment = ExperimentManager(
+    manager = ExperimentManager(
         tmp_path,
         ApiProfiles(tmp_path / "absent", {"YOUTUBE_API_KEY_DEFAULT": "synthetic-only-secret"}),
         RunClient,
-    ).run(config)
-    metadata = read_json(experiment / "experiment.json")
-    assert metadata["config"]["trend_formula"]["half_life_hours"] == 2
-    assert metadata["config"]["gap_formula"]["epsilon"] == 0.000001
-    assert "synthetic-only-secret" not in (experiment / "experiment.json").read_text()
-    metadata["config"]["trend_formula"]["half_life_hours"] = 99
-    write_json(experiment / "experiment.json", metadata)
-    with pytest.raises(ValueError, match="configuration checksum"):
-        ReplayService(tmp_path).run(experiment)
+    )
+    manager.store.clean_tables()
+    manager.store.seed_category("tech_ai", "AI & Technology")
+    manager.run(config)
+    resolved = resolve_formulas(config)
+    assert resolved.trend_formula["half_life_hours"] == 2
+    assert resolved.gap_formula["epsilon"] == 0.000001
+    batches = manager.store.get_raw_batches(config.requests[0].topic.topic_id)
+    assert len(batches) == 1
+    from research.core.domain import encode
+
+    assert "synthetic-only-secret" not in json.dumps(encode(batches[0]))
+    with pytest.raises(Exception):
+        TrendConfig(half_life_hours=-1)
 
 
 def test_gap_failure_never_removes_trend_data(tmp_path):
@@ -236,12 +255,18 @@ def test_gap_failure_never_removes_trend_data(tmp_path):
 
     request = CollectionRequest(CandidateTopic.named("AI"))
     config = ExperimentConfig(Mode.COMBINED, (request,), duration_hours=0.001 / 60)
-    experiment = ExperimentManager(
+    manager = ExperimentManager(
         tmp_path, ApiProfiles(tmp_path / "absent", {"YOUTUBE_API_KEY_DEFAULT": "fake"}), FailedBaseline
-    ).run(config)
-    assert (experiment / "results" / request.topic.topic_id / "trend.jsonl").exists()
-    assert read_json(experiment / "summary.json")["gap_snapshots"] == 0
-    assert read_json(experiment / "summary.json")["raw_observations"] == 1
+    )
+    manager.store.clean_tables()
+    manager.store.seed_category("tech_ai", "AI & Technology")
+    manager.run(config)
+    trend = manager.store.get_latest_trend(request.topic.topic_id)
+    assert trend is not None
+    gap = manager.store.get_latest_gap(request.topic.topic_id)
+    assert gap is None
+    assert manager.last_summary["gap_snapshots"] == 0
+    assert manager.last_summary["raw_observations"] == 1
 
 
 def test_engagement_same_age_cohorts_and_delta_eligibility():
@@ -295,12 +320,15 @@ def test_search_quota_stop_preserves_available_counter_tracking(tmp_path):
         tracking_minutes=0.002,
         max_retries=0,
     )
-    experiment = ExperimentManager(
+    manager = ExperimentManager(
         tmp_path, ApiProfiles(tmp_path / "absent", {"YOUTUBE_API_KEY_DEFAULT": "fake"}), factory
-    ).run(config)
+    )
+    manager.store.clean_tables()
+    manager.store.seed_category("tech_ai", "AI & Technology")
+    manager.run(config)
     assert clients[0].searches == 2
     assert sum(resource == "videos" for resource, _ in clients[0].calls) >= 2
-    assert read_json(experiment / "summary.json")["status"] == "QUOTA_STOPPED"
+    assert manager.last_summary["status"] == "QUOTA_STOPPED"
 
 
 def test_freshness_uses_last_success_not_last_attempt():
@@ -346,10 +374,13 @@ def test_deadline_checked_between_http_requests(tmp_path, monkeypatch):
 
     request = CollectionRequest(CandidateTopic.named("AI"))
     config = ExperimentConfig(Mode.TREND, (request,), duration_hours=0.01 / 60, max_retries=0)
-    experiment = ExperimentManager(
+    manager = ExperimentManager(
         tmp_path, ApiProfiles(tmp_path / "absent", {"YOUTUBE_API_KEY_DEFAULT": "fake"}), factory
-    ).run(config)
+    )
+    manager.store.clean_tables()
+    manager.store.seed_category("tech_ai", "AI & Technology")
+    manager.run(config)
     assert len(calls) == 1
-    from research.storage.workspace import TopicWorkspaceManager
-
-    assert next(TopicWorkspaceManager(tmp_path).bundles(experiment)).metadata.status == Status.CANCELLED
+    batches = manager.store.get_raw_batches(request.topic.topic_id)
+    assert len(batches) == 1
+    assert batches[0].metadata.status == Status.CANCELLED

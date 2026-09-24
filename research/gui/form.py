@@ -141,7 +141,9 @@ class ExperimentForm(QWidget):
         self.end.dateTimeChanged.connect(self.update_preview)
         self.minimum_age.valueChanged.connect(self.update_preview)
         self.endless.toggled.connect(self.duration.setDisabled)
-        self.window.setToolTip("STATIC stays fixed. ROLLING moves the whole initial From/To range with elapsed real time.")
+        self.window.setToolTip(
+            "STATIC stays fixed. ROLLING moves the whole initial From/To range with elapsed real time."
+        )
         self.start.setToolTip("Publication-time lower bound for the initial experiment window.")
         self.end.setToolTip("Publication-time upper bound for the initial experiment window.")
         self.minimum_age.setToolTip("Excludes the newest part of time without reducing rolling window width.")

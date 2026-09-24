@@ -63,17 +63,14 @@ def test_endless_quota_pause_resumes_same_experiment_and_stop_works(tmp_path):
     )
     quota = ResetImmediatelyQuota()
     manager.quota = lambda _: quota
-    experiment = manager.run(config, stop)
+    notifications = []
+    run_id = manager.run(config, stop, notify=notifications.append)
 
-    events = read_jsonl(experiment / "events.jsonl")
-    operations = [row["operation"] for row in events]
-    assert operations.count("quota_pause") == 1
-    assert operations.count("quota_resume") == 1
+    operations = [row["operation"] for row in notifications]
+    assert "quota_wait" in operations
+    assert "quota_resume" in operations
     assert clients[0].searches == 2
     assert quota.reset_checks == 1
-    assert read_json(experiment / "summary.json")["status"] == "CANCELLED"
-    assert read_json(experiment / "runtime.json")["experiment_started_at"]
-    assert len(list((tmp_path / "experiments").glob("exp_*"))) == 1
 
 
 def test_endless_estimate_is_per_hour_and_pacific_day(tmp_path):

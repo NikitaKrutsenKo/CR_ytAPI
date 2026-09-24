@@ -1,5 +1,6 @@
 """High-level application experiment management and preflight execution."""
 
+
 from __future__ import annotations
 
 import time
@@ -12,10 +13,11 @@ from research.api.profiles import ApiProfiles
 from research.api.quota import QuotaEstimate, QuotaManager, QuotaStopped
 from research.core.configuration import resolve_formulas
 from research.core.domain import ExperimentConfig
+from research.core.time import now_utc
 from research.metrics.calculators import MetricConfig
 from research.metrics.trend import TrendConfig
 from research.orchestration.execution import ExperimentRun
-from research.storage.workspace import TopicWorkspaceManager
+from research.storage.db import DatabaseQuotaManager, DatabaseStorageAdapter
 
 
 class ExperimentManager:
@@ -28,14 +30,15 @@ class ExperimentManager:
         client_factory: Callable = YouTubeClient,
     ) -> None:
         self.root = Path(root)
-        self.store = TopicWorkspaceManager(root)
+        self.store = DatabaseStorageAdapter()
         self.profiles = profiles or ApiProfiles(self.root / ".env")
         self.client_factory = client_factory
+        self.last_summary: dict | None = None
 
-    def quota(self, config: ExperimentConfig) -> QuotaManager:
-        """Create a QuotaManager instance for the profile specified in the experiment config."""
-        return QuotaManager(
-            self.root / "data" / "quota.sqlite",
+    def quota(self, config: ExperimentConfig) -> DatabaseQuotaManager:
+        """Create a DatabaseQuotaManager instance backed by the PostgreSQL quota_ledger table."""
+        return DatabaseQuotaManager(
+            self.store,
             config.api_profile_name,
             config.search_budget,
             config.other_budget,
@@ -67,7 +70,19 @@ class ExperimentManager:
         MetricConfig(**config.gap_formula).validate()
         TrendConfig(**config.trend_formula)
         stop = stop or Event()
-        experiment = self.store.create(config)
+
+        # generate a unique run id (formerly experiment path)
+        run_id = "exp_" + now_utc().strftime("%Y%m%dT%H%M%S")
+
+        # Ensure candidate topics exist in the topics table for foreign keys
+        for request in config.requests:
+            self.store.register_topic(
+                topic_id=request.topic.topic_id,
+                canonical_name=request.topic.canonical_name,
+                query=request.topic.canonical_name,
+                category_id=getattr(request.topic, "category", None) or "tech_ai",
+            )
+
         client = self.client_factory(
             secret,
             quota=quota,
@@ -76,7 +91,19 @@ class ExperimentManager:
             cancelled=stop.is_set,
             sleeper=stop.wait,
         )
-        run = ExperimentRun(config, self.store, experiment, client, quota, estimate, stop, notify)
-        client.cancelled = lambda: stop.is_set() or (not config.endless_mode and time.monotonic() >= run.deadline)
+        run = ExperimentRun(
+            config,
+            self.store,
+            run_id,
+            client,
+            quota,
+            estimate,
+            stop,
+            notify,
+        )
+        client.cancelled = lambda: (
+            stop.is_set() or (not config.endless_mode and time.monotonic() >= run.deadline)
+        )
         run.execute()
-        return experiment
+        self.last_summary = run.summary
+        return run_id

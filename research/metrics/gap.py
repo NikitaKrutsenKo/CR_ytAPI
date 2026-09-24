@@ -9,7 +9,7 @@ from statistics import mean, median
 
 from research.api.discovery import observation
 from research.api.services import YouTubeVideoService
-from research.core.domain import CollectionBundle, ExperimentConfig
+from research.core.domain import CollectionBundle, ExperimentConfig, Mode, encode
 from research.core.models import (
     CollectionInfo,
     MetricSnapshot,
@@ -28,7 +28,7 @@ from research.metrics.calculators import (
     view_rate,
     weighted_state_update,
 )
-from research.storage.io import read_json, write_json
+from research.storage.db import DatabaseStorageAdapter
 from research.storage.state import MetricsState, NormalizationBoundaryState
 
 log = logging.getLogger(__name__)
@@ -124,13 +124,9 @@ class GapEngine:
                 self.config.half_life_hours,
             )
 
-        creator_rates = [
-            creator_median_views_rate(video, self.config.epsilon)
-            for video in batch.videos
-        ]
+        creator_rates = [creator_median_views_rate(video, self.config.epsilon) for video in batch.videos]
         creator_authorities = [
-            creator_rate / (topic_rate + self.config.epsilon)
-            for creator_rate in creator_rates
+            creator_rate / (topic_rate + self.config.epsilon) for creator_rate in creator_rates
         ]
 
         # 1. Extreme tail anchors for supply normalization
@@ -177,7 +173,8 @@ class GapEngine:
                 video.views,
                 age_hours(video.published_at, now),
                 self.config.epsilon,
-            ) / (expected_rate + self.config.epsilon)
+            )
+            / (expected_rate + self.config.epsilon)
             for video, expected_rate in zip(batch.videos, expected_rates)
         )
 
@@ -211,10 +208,7 @@ class GapEngine:
         er_norm = log_min_max_normalize(er_batch, er_low, er_high, self.config.epsilon)
         pr_norm = log_min_max_normalize(pr_batch, pr_low, pr_high, self.config.epsilon)
 
-        demand_batch = (
-            self.config.demand_weight_er * er_norm
-            + self.config.demand_weight_pr * pr_norm
-        )
+        demand_batch = self.config.demand_weight_er * er_norm + self.config.demand_weight_pr * pr_norm
         if not state.initialized:
             demand = demand_batch
         else:
@@ -301,8 +295,7 @@ class GapEngine:
     def _engagement_rates_per_video(self, batch: YouTubeBatch) -> list[float]:
         """Calculate individual engagement rate for each video in the batch."""
         return [
-            (video.likes + video.comments) / (video.views + self.config.epsilon)
-            for video in batch.videos
+            (video.likes + video.comments) / (video.views + self.config.epsilon) for video in batch.videos
         ]
 
     def _performance_ratios_per_video(self, batch: YouTubeBatch, now: datetime) -> list[float]:
@@ -346,55 +339,47 @@ class GapEngine:
         if not initialized:
             return batch_low, batch_high
         return (
-            weighted_state_update(
-                previous_low, batch_low, delta_hours, self.config.half_life_hours
-            ),
-            weighted_state_update(
-                previous_high, batch_high, delta_hours, self.config.half_life_hours
-            ),
+            weighted_state_update(previous_low, batch_low, delta_hours, self.config.half_life_hours),
+            weighted_state_update(previous_high, batch_high, delta_hours, self.config.half_life_hours),
         )
 
 
 class GapEnricher:
-    """Creator baseline enrichment cache with configurable TTL.
+    """Creator baseline enrichment using PostgreSQL creator_baselines table with configurable TTL.
 
     Fetches creator upload playlists and recent baseline videos, excluding the current
     thematic batch to prevent circular baseline contamination.
     """
 
-    def __init__(self, client, cache_path: Path, config: ExperimentConfig, max_entries: int = 1000) -> None:
+    def __init__(
+        self,
+        client: Any,
+        db: DatabaseStorageAdapter,
+        config: ExperimentConfig | None = None,
+    ) -> None:
+        if db is None or not isinstance(db, DatabaseStorageAdapter):
+            raise RuntimeError("DatabaseStorageAdapter connection required for GapEnricher")
         self.client = client
-        self.cache_path = cache_path
-        self.config = config
-        self.max_entries = max_entries
-        self.cache = read_json(cache_path) if cache_path.exists() else {}
-        self._prune_cache()
+        self.db = db
+        self.config = config or ExperimentConfig(Mode.COMBINED, ())
         self.videos = YouTubeVideoService(client)
-
-    def _prune_cache(self) -> None:
-        """Prune oldest entries if creator cache exceeds maximum capacity."""
-        if len(self.cache) <= self.max_entries:
-            return
-        sorted_channels = sorted(
-            self.cache.keys(),
-            key=lambda c: self.cache[c].get("last_refresh", ""),
-        )
-        to_remove = len(self.cache) - self.max_entries
-        for channel in sorted_channels[:to_remove]:
-            del self.cache[channel]
 
     def enrich(self, bundle: CollectionBundle) -> YouTubeBatch:
         """Enrich a CollectionBundle into a YouTubeBatch with recent creator baselines."""
         now = now_utc()
         channels = sorted({v.identity.channel_id for v in bundle.observations})
         excluded = {v.video_id for v in bundle.discovery}
-        stale = [
-            c
-            for c in channels
-            if c not in self.cache
-            or now - utc(self.cache[c]["last_refresh"]) >= timedelta(hours=self.config.baseline_ttl_hours)
-        ]
-        uploads = {}
+
+        cached_baselines: dict[str, dict[str, Any]] = {}
+        stale: list[str] = []
+        for channel in channels:
+            row = self.db.get_creator_baseline(channel)
+            if row and row.get("details"):
+                cached_baselines[channel] = row["details"]
+            else:
+                stale.append(channel)
+
+        uploads: dict[str, str | None] = {}
         for offset in range(0, len(stale), 50):
             response = self.client.get(
                 "channels", {"part": "contentDetails", "id": ",".join(stale[offset : offset + 50])}
@@ -403,7 +388,8 @@ class GapEnricher:
                 uploads[item["id"]] = (
                     item.get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads")
                 )
-        selected = {}
+
+        selected: dict[str, list[str]] = {}
         for channel in stale:
             ids, token = [], None
             for _ in range(self.config.baseline_pages):
@@ -421,6 +407,7 @@ class GapEnricher:
                 if len(ids) >= self.config.baseline_max or not token:
                     break
             selected[channel] = ids[: self.config.baseline_max]
+
         details = {
             item["id"]: item
             for item in self.videos.get_videos_batched(v for ids in selected.values() for v in ids)
@@ -434,28 +421,51 @@ class GapEnricher:
                         records.append(observation(details[identifier], timestamp))
                     except (KeyError, ValueError, TypeError):
                         log.warning("baseline_video_invalid channel_id=%s video_id=%s", channel, identifier)
-            self.cache[channel] = {
+
+            rates = [
+                r.views / (max(age_hours(r.identity.published_at, now), 0.0) + 1e-6)
+                for r in records
+                if r.views is not None
+            ]
+            creator_rate = float(median(rates)) if rates else 0.0
+
+            baseline_details = {
                 "uploads_playlist_id": uploads.get(channel),
                 "recent_video_ids": identifiers,
                 "last_refresh": timestamp,
-                "observations": records,
+                "observations": [encode(r) for r in records],
             }
-        self._prune_cache()
-        write_json(self.cache_path, self.cache)
-        self.cache = read_json(self.cache_path)
+            self.db.save_creator_baseline(
+                channel_id=channel,
+                creator_rate=creator_rate,
+                sample_count=len(records),
+                details=baseline_details,
+                ttl_hours=self.config.baseline_ttl_hours,
+            )
+            cached_baselines[channel] = baseline_details
+
         videos = []
         for current in bundle.observations:
             identity = current.identity
             baseline = []
-            for previous in self.cache.get(identity.channel_id, {}).get("observations", []):
-                if previous["identity"]["video_id"] in excluded or previous["views"] is None:
-                    continue
-                age = (
-                    utc(previous["timestamp"]) - utc(previous["identity"]["published_at"])
-                ).total_seconds() / 3600
-                baseline.append(
-                    RecentVideoStat(previous["identity"]["video_id"], max(age, 0), previous["views"])
+            obs_list = cached_baselines.get(identity.channel_id, {}).get("observations", [])
+            for previous in obs_list:
+                prev_id = (
+                    previous["identity"]["video_id"]
+                    if isinstance(previous.get("identity"), dict)
+                    else getattr(previous.get("identity"), "video_id", None)
                 )
+                if prev_id in excluded or previous.get("views") is None:
+                    continue
+                prev_ts = previous["timestamp"]
+                prev_pub = (
+                    previous["identity"]["published_at"]
+                    if isinstance(previous.get("identity"), dict)
+                    else previous["identity"].published_at
+                )
+                age = (utc(prev_ts) - utc(prev_pub)).total_seconds() / 3600
+                baseline.append(RecentVideoStat(prev_id, max(age, 0.0), previous["views"]))
+
             if len(baseline) < self.config.baseline_min or any(
                 v is None for v in (current.views, current.likes, current.comments)
             ):

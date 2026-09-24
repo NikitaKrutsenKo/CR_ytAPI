@@ -179,9 +179,7 @@ class WindowResolver:
         capped = end > latest
         effective_to = min(end, latest)
         effective_from = (
-            effective_to - timedelta(seconds=width)
-            if capped and request.window_mode == "ROLLING"
-            else start
+            effective_to - timedelta(seconds=width) if capped and request.window_mode == "ROLLING" else start
         )
         if effective_from >= effective_to:
             raise ValueError("Effective From must be earlier than effective To after minimum-age capping")
@@ -407,7 +405,11 @@ class ExperimentConfig:
             raise ValueError("Duration hours must be positive and finite for a finite experiment")
         if not math.isfinite(self.minimum_video_age_hours) or self.minimum_video_age_hours < 0:
             raise ValueError("Minimum video age must be non-negative and finite")
-        if isinstance(self.minimum_views, bool) or not isinstance(self.minimum_views, int) or self.minimum_views < 0:
+        if (
+            isinstance(self.minimum_views, bool)
+            or not isinstance(self.minimum_views, int)
+            or self.minimum_views < 0
+        ):
             raise ValueError("Minimum views must be a non-negative integer")
         if not 1 <= self.baseline_min <= self.baseline_max <= 50 or self.baseline_pages < 1:
             raise ValueError("Invalid creator baseline settings")
